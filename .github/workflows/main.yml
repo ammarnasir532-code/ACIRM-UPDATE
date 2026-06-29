@@ -1,479 +1,334 @@
-name: ACIRM R22F R10B R16 SPI511 robust referenced download dynamic SPI
+name: ACIRM R22F R10B R17B safe download diagnostic
 
 on:
   workflow_dispatch:
-    inputs:
-      allow_redownload:
-        description: 'Allow downloading missing referenced files'
-        required: true
-        default: 'true'
-      run_osa_after_download:
-        description: 'Run OSA only if 55/55 referenced files are present'
-        required: true
-        default: 'true'
 
 jobs:
-  r22f-r10b-r16-robust-referenced-download-dynamic-spi:
+  r17b-safe-download-diagnostic:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 45
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Prepare locked state
+      - name: Prepare folders
         shell: bash
         run: |
           set -euo pipefail
-          RUN_ID="R22F_R10B_R16_SPI511_ROBUST_REFERENCED_DOWNLOAD_DYNAMIC_SPI_EXECUTION"
-          CACHE="ACIRM_CACHE_R10B_R16"
+          RUN_ID="R22F_R10B_R17B_SAFE_DOWNLOAD_DIAGNOSTIC"
+          CACHE="ACIRM_CACHE_R10B_R17B"
           echo "RUN_ID=${RUN_ID}" >> "$GITHUB_ENV"
           echo "CACHE=${CACHE}" >> "$GITHUB_ENV"
-          mkdir -p "$RUN_ID" "$RUN_ID/logs" "$RUN_ID/scripts" "$RUN_ID/slim_results" "$CACHE/scw" "$CACHE/aux" "$CACHE/ic" "$CACHE/idx" "$CACHE/cat"
+          mkdir -p "$RUN_ID/logs" "$RUN_ID/scripts" "$CACHE/scw" "$CACHE/aux" "$CACHE/ic" "$CACHE/idx" "$CACHE/cat"
           echo "false" > "$RUN_ID/DOWNLOAD_COMPLETE.flag"
-          echo "false" > "$RUN_ID/PREFLIGHT_PASS.flag"
-          echo "false" > "$RUN_ID/OG_CREATE_PASS.flag"
-          echo "false" > "$RUN_ID/DIRECT_SPI_PASS.flag"
-          echo "not_started" > "$RUN_ID/RUN_STAGE.txt"
-          cat > "$RUN_ID/LOCK.json" <<'JSON'
-          {
-            "run_id": "R22F_R10B_R16_SPI511_ROBUST_REFERENCED_DOWNLOAD_DYNAMIC_SPI_EXECUTION",
-            "parent_result": "R22F_R10B_R15_SWG_REFERENCED_DOWNLOAD_INCOMPLETE_NO_THEORY_FAILURE",
-            "critical_repair": "Use robust resume/retry download and require complete SWG-referenced data tree before OSA execution.",
-            "instrument": "INTEGRAL_SPI",
-            "revision": "2504",
-            "locked_scw": [
-              "250400090010",
-              "250400020010",
-              "250400080010",
-              "250400030010",
-              "250400070021",
-              "250400040010",
-              "250400060010",
-              "250400050010"
-            ],
-            "line_band_keV": [508.0, 514.0],
-            "low_sideband_keV": [490.0, 500.0],
-            "high_sideband_keV": [522.0, 532.0],
-            "min_line_to_sideband_ratio": 1.2,
-            "claim_ceiling": "ROBUST_REFERENCED_DOWNLOAD_DYNAMIC_SPI_RUN_OUTPUT_NOT_PROOF_NOT_FINAL_LAW",
-            "no_rescue_rules": [
-              "No energy-band change after results.",
-              "No SCW drop after results.",
-              "No threshold reduction after results.",
-              "Do not start OSA if referenced data tree is incomplete.",
-              "Only RUN_OUTPUT files under obs/r10b_r16_og/spi are accepted for line-sideband extraction.",
-              "Any technical failure is TECHNICAL_NO_GO_NO_THEORY_FAILURE."
-            ]
-          }
-          JSON
+          cat > "$RUN_ID/README.txt" <<'TXT'
+          R17B safe download diagnostic only.
+          No OSA. No spibounds. No spihist. No SPI 511 measurement.
+          This workflow only checks and downloads required INTEGRAL/SPI support files with caps.
+          TXT
 
-      - name: Install host tools
+      - name: Install tools
         shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update -y
-          sudo apt-get install -y curl ca-certificates xvfb zip unzip
-          python3 -m pip install -q astropy numpy pandas
-          {
-            echo "date_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            echo "runner=$(uname -a)"
-            echo "disk_start"; df -h
-            echo "memory_start"; free -h || true
-            echo "docker_version"; docker --version || true
-            echo "curl_version"; curl --version | head -5 || true
-          } | tee "$RUN_ID/logs/system_preflight.log"
+          sudo apt-get install -y curl ca-certificates zip unzip
+          python3 -m pip install -q astropy numpy
+          date -u | tee "$RUN_ID/logs/start_time_utc.txt"
+          df -h | tee "$RUN_ID/logs/disk_start.txt"
 
-      - name: Restore R16 and older R10B caches
+      - name: Restore cache
         uses: actions/cache@v4
         with:
-          path: ACIRM_CACHE_R10B_R16
-          key: acirm-r22f-r10b-r16-rev2504-referenced-cache-v1
+          path: |
+            ACIRM_CACHE_R10B_R4
+            ACIRM_CACHE_R10B_R14
+            ACIRM_CACHE_R10B_R15
+            ACIRM_CACHE_R10B_R16
+            ACIRM_CACHE_R10B_R17
+            ACIRM_CACHE_R10B_R17B
+          key: acirm-r10b-r17b-safe-download-cache-v1
           restore-keys: |
-            acirm-r22f-r10b-r16-rev2504-referenced-cache-
-            acirm-r22f-r10b-r15-
-            acirm-r22f-r10b-r14-
-            acirm-r22f-r10b-r4-
+            acirm-r10b-
             acirm-r22f-r10b-
 
-      - name: Write robust downloader OSA scripts and extractor
+      - name: Write diagnostic script
         shell: bash
         run: |
           set -euo pipefail
-          cat > "$RUN_ID/scripts/download_referenced_robust.py" <<'PY'
-          import os, re, json, csv, subprocess, time
+          cat > "$RUN_ID/scripts/r17b_safe_download.py" <<'PY'
+          import os, re, csv, json, shutil, subprocess, time
           from pathlib import Path
-          RUN_ID="R22F_R10B_R16_SPI511_ROBUST_REFERENCED_DOWNLOAD_DYNAMIC_SPI_EXECUTION"
-          ROOT=Path.cwd(); OUT=ROOT/RUN_ID; CACHE=ROOT/"ACIRM_CACHE_R10B_R16"
-          SCWS=["250400090010","250400020010","250400080010","250400030010","250400070021","250400040010","250400060010","250400050010"]
-          REV="2504"
-          ALLOW=os.environ.get("ALLOW_REDOWNLOAD","true").lower()=="true"
-          BASES=[
-            "https://heasarc.gsfc.nasa.gov/FTP/integral/data/",
-            "https://isdc.unige.ch/integral/archive/data/",
-            "https://www.isdc.unige.ch/integral/archive/data/",
+          from urllib.parse import quote
+
+          RUN_ID = "R22F_R10B_R17B_SAFE_DOWNLOAD_DIAGNOSTIC"
+          ROOT = Path.cwd()
+          OUT = ROOT / RUN_ID
+          CACHE = ROOT / "ACIRM_CACHE_R10B_R17B"
+          REV = "2504"
+          SCW = [
+              "250400090010", "250400020010", "250400080010", "250400030010",
+              "250400070021", "250400040010", "250400060010", "250400050010"
           ]
-          for d in ["scw","aux","ic","idx","cat"]: (CACHE/d).mkdir(parents=True, exist_ok=True)
-          rows=[]
+          BASES = [
+              "https://heasarc.gsfc.nasa.gov/FTP/integral/data/",
+              "https://isdc.unige.ch/integral/archive/data/",
+              "https://www.isdc.unige.ch/integral/archive/data/",
+          ]
+          MAX_FILES = 55
+          MAX_TOTAL_MB = 2200.0
+          PER_FILE_MAX_TIME = 60
+          CONNECT_TIMEOUT = 10
+
+          for d in ["scw", "aux", "ic", "idx", "cat"]:
+              (CACHE / d).mkdir(parents=True, exist_ok=True)
+
+          existing_cache_dirs = [p for p in ROOT.glob("ACIRM_CACHE_R10B_*") if p.is_dir()]
+
+          def write_csv(path, rows, fields):
+              with open(path, "w", newline="", encoding="utf-8") as f:
+                  w = csv.DictWriter(f, fieldnames=fields)
+                  w.writeheader()
+                  w.writerows(rows)
+
+          def find_existing(rel):
+              for c in existing_cache_dirs:
+                  p = c / rel
+                  if p.exists() and p.stat().st_size > 0:
+                      return p
+              return None
+
+          def copy_existing(rel):
+              dst = CACHE / rel
+              if dst.exists() and dst.stat().st_size > 0:
+                  return "CACHE_R17B", dst.stat().st_size
+              src = find_existing(rel)
+              if src:
+                  dst.parent.mkdir(parents=True, exist_ok=True)
+                  shutil.copy2(src, dst)
+                  return "COPIED_LOCAL", dst.stat().st_size
+              return "MISSING_LOCAL", 0
+
+          def rel_urls(rel):
+              rel_s = str(rel).replace("\\", "/").lstrip("/")
+              enc = "/".join(quote(x) for x in rel_s.split("/"))
+              return [b + enc for b in BASES]
+
           def curl_download(rel):
-              out=CACHE/rel; out.parent.mkdir(parents=True, exist_ok=True)
-              if out.exists() and out.stat().st_size>0:
-                  return "CACHE", out.stat().st_size
-              if not ALLOW:
-                  return "MISSING_REDOWNLOAD_DISABLED", 0
-              last=""
-              tmp=out.with_suffix(out.suffix+".part")
-              for base in BASES:
-                  url=base+rel
-                  cmd=["curl","-L","--fail","--retry","8","--retry-delay","10","--connect-timeout","60","--max-time","900","--speed-time","120","--speed-limit","1024","-C","-","-o",str(tmp),url]
-                  t0=time.time()
-                  p=subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-                  log=(p.stdout or "")[-1000:]
-                  if p.returncode==0 and tmp.exists() and tmp.stat().st_size>0:
-                      tmp.replace(out)
-                      return "DOWNLOADED", out.stat().st_size
-                  last=f"curl_rc={p.returncode}; {log[:300].replace(chr(10),' ')}"
-              return "DOWNLOAD_FAILED_"+last[:500], 0
-          # Required list: R15-discovered fixed members.
-          required=[]
-          for scw in SCWS:
-              required.append(f"scw/{REV}/{scw}.001/swg.fits")
-          # download swg first
-          for rel in required[:]:
-              st,sz=curl_download(rel); rows.append({"phase":"swg_seed","rel":rel,"status":st,"bytes":sz})
-          # parse SWG references if available, plus known SPI members.
-          member_rels=set(required)
-          for scw in SCWS:
-              base=f"scw/{REV}/{scw}.001"
-              p=CACHE/base/"swg.fits"
-              txt=p.read_bytes().decode("latin-1",errors="ignore") if p.exists() else ""
-              for m in re.finditer(r"data/(scw/2504/[^\s\x00\r\n]+?\.fits|aux/adp/[^\s\x00\r\n]+?\.fits)", txt):
-                  member_rels.add(m.group(1).strip())
-              for fn in ["spi_spectra.fits","spi_oper.fits","spi_science_hk.fits","spi_gti.fits","sc_gti.fits"]:
-                  member_rels.add(f"{base}/{fn}")
-          for rel in [
-            "aux/adp/2504.001/orbit_historic.fits",
-            "aux/adp/2504.001/attitude_historic.fits",
-            "aux/adp/2504.001/time_correlation.fits",
-            "aux/adp/2504.001/pointing_definition_predicted_0001.fits",
-            "aux/adp/2504.001/observation_log.fits",
-            "aux/adp/2504.001/moc_out_of_limits.fits",
-            "aux/adp/2504.001/attitude_predicted_01.fits",
-          ]:
-              member_rels.add(rel)
-          # Download missing/referenced.
-          for rel in sorted(member_rels):
-              if any(r["rel"]==rel for r in rows):
+              dst = CACHE / rel
+              dst.parent.mkdir(parents=True, exist_ok=True)
+              tmp = Path(str(dst) + ".part")
+              attempts = []
+              for url in rel_urls(rel):
+                  cmd = [
+                      "curl", "-fL", "--connect-timeout", str(CONNECT_TIMEOUT),
+                      "--max-time", str(PER_FILE_MAX_TIME), "--retry", "1", "--retry-delay", "2",
+                      "-o", str(tmp), url
+                  ]
+                  t0 = time.time()
+                  cp = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                  elapsed = round(time.time() - t0, 3)
+                  size = tmp.stat().st_size if tmp.exists() else 0
+                  attempts.append({
+                      "relpath": str(rel), "url": url, "exit": cp.returncode,
+                      "elapsed_sec": elapsed, "bytes_tmp": size,
+                      "stderr_tail": cp.stderr[-240:].replace("\n", " ")
+                  })
+                  if cp.returncode == 0 and size > 0:
+                      tmp.replace(dst)
+                      return "DOWNLOADED", dst.stat().st_size, attempts
+                  if tmp.exists():
+                      tmp.unlink(missing_ok=True)
+              return "DOWNLOAD_FAILED", 0, attempts
+
+          def ensure_file(rel):
+              st, b = copy_existing(rel)
+              if b > 0:
+                  return st, b, []
+              st, b, attempts = curl_download(rel)
+              return st, b, attempts
+
+          swg_rows = []
+          attempts_all = []
+          for scw in SCW:
+              rel = Path("scw") / REV / f"{scw}.001" / "swg.fits"
+              st, b, attempts = ensure_file(rel)
+              attempts_all.extend(attempts)
+              swg_rows.append({"scw": scw, "relpath": str(rel), "status": st, "bytes": b})
+
+          required = set()
+          parse_rows = []
+          common = ["spi_spectra.fits", "spi_oper.fits", "spi_science_hk.fits", "spi_gti.fits", "sc_gti.fits"]
+          for scw in SCW:
+              for fn in common:
+                  required.add(str(Path("scw") / REV / f"{scw}.001" / fn))
+
+          try:
+              from astropy.io import fits
+              token_re = re.compile(r"[A-Za-z0-9_./+\-]+\.fits(?:\.gz)?(?:\[[^\]]+\])?")
+              for scw in SCW:
+                  swg = CACHE / "scw" / REV / f"{scw}.001" / "swg.fits"
+                  if not swg.exists():
+                      continue
+                  try:
+                      hdul = fits.open(swg, memmap=False)
+                      texts = []
+                      for hdu in hdul:
+                          for _, v in hdu.header.items():
+                              if isinstance(v, str) and ".fits" in v:
+                                  texts.append(v)
+                          data = getattr(hdu, "data", None)
+                          names = getattr(data, "names", None)
+                          if data is not None and names:
+                              for n in names:
+                                  try:
+                                      col = data[n]
+                                      vals = col.ravel()[:1000] if hasattr(col, "ravel") else col[:1000]
+                                      for x in vals:
+                                          s = x.decode("utf-8", errors="ignore") if isinstance(x, bytes) else str(x)
+                                          if ".fits" in s:
+                                              texts.append(s)
+                                  except Exception:
+                                      pass
+                      for txt in texts:
+                          for raw in token_re.findall(txt):
+                              tok = raw.split("[")[0].strip().strip("'\"()")
+                              rel = None
+                              for anchor in ["scw/", "aux/", "ic/", "idx/", "cat/"]:
+                                  if anchor in tok:
+                                      rel = tok[tok.index(anchor):]
+                                      break
+                              if rel is None:
+                                  rel = str(Path("scw") / REV / f"{scw}.001" / Path(tok).name)
+                              if rel and not rel.endswith("swg.fits"):
+                                  required.add(rel)
+                                  parse_rows.append({"source_swg": str(swg), "raw_token": raw, "relpath": rel})
+                  except Exception as e:
+                      parse_rows.append({"source_swg": str(swg), "raw_token": "PARSE_FAILED", "relpath": repr(e)[:140]})
+          except Exception as e:
+              parse_rows.append({"source_swg": "ASTROPY_UNAVAILABLE", "raw_token": repr(e)[:140], "relpath": ""})
+
+          member_rows = []
+          attempted = 0
+          new_bytes = 0
+          for rel_s in sorted(required):
+              rel = Path(rel_s)
+              st, b = copy_existing(rel)
+              if b > 0:
+                  member_rows.append({"relpath": rel_s, "status": st, "bytes": b, "attempted_now": False})
                   continue
-              st,sz=curl_download(rel); rows.append({"phase":"referenced_member","rel":rel,"status":st,"bytes":sz})
-          missing=[rel for rel in sorted(member_rels) if not (CACHE/rel).exists() or (CACHE/rel).stat().st_size<=0]
-          with (OUT/"swg_referenced_download_log.csv").open("w",newline="",encoding="utf-8") as f:
-              w=csv.DictWriter(f, fieldnames=["phase","rel","status","bytes"]); w.writeheader(); w.writerows(rows)
-          with (OUT/"scw_dol.list").open("w",encoding="utf-8") as f:
-              for scw in SCWS: f.write(f"/data/scw/{REV}/{scw}.001/swg.fits\n")
-          status={"required_member_count":len(member_rels),"missing_member_count":len(missing),"missing_members":missing[:120],"downloaded_or_cached_files":sum(1 for rel in member_rels if (CACHE/rel).exists() and (CACHE/rel).stat().st_size>0),"allow_redownload":ALLOW}
-          (OUT/"swg_referenced_download_status.json").write_text(json.dumps(status,indent=2,sort_keys=True),encoding="utf-8")
-          print(json.dumps(status,indent=2,sort_keys=True))
-          if missing:
-              raise SystemExit(66)
+              if attempted >= MAX_FILES:
+                  member_rows.append({"relpath": rel_s, "status": "SKIPPED_MAX_FILES", "bytes": 0, "attempted_now": False})
+                  continue
+              if new_bytes / 1e6 >= MAX_TOTAL_MB:
+                  member_rows.append({"relpath": rel_s, "status": "SKIPPED_MAX_TOTAL_MB", "bytes": 0, "attempted_now": False})
+                  continue
+              st, b, attempts = curl_download(rel)
+              attempts_all.extend(attempts)
+              attempted += 1
+              new_bytes += b
+              member_rows.append({"relpath": rel_s, "status": st, "bytes": b, "attempted_now": True})
+
+          write_csv(OUT / "swg_status.csv", swg_rows, ["scw", "relpath", "status", "bytes"])
+          write_csv(OUT / "swg_reference_parse.csv", parse_rows, ["source_swg", "raw_token", "relpath"])
+          write_csv(OUT / "required_members_status.csv", member_rows, ["relpath", "status", "bytes", "attempted_now"])
+          write_csv(OUT / "curl_attempts.csv", attempts_all, ["relpath", "url", "exit", "elapsed_sec", "bytes_tmp", "stderr_tail"])
+
+          swg_missing = sum(1 for r in swg_rows if int(r["bytes"] or 0) <= 0)
+          missing_members = [r for r in member_rows if int(r["bytes"] or 0) <= 0]
+          completed = swg_missing == 0 and len(member_rows) > 0 and len(missing_members) == 0
+          summary = {
+              "run_id": RUN_ID,
+              "swg_missing_count": swg_missing,
+              "required_member_count": len(member_rows),
+              "missing_member_count": len(missing_members),
+              "attempted_member_downloads_now": attempted,
+              "downloaded_new_mb_estimate": new_bytes / 1e6,
+              "download_complete": completed,
+              "decision": "R17B_DOWNLOAD_COMPLETE_READY_FOR_OSA_NEXT" if completed else "R17B_DOWNLOAD_INCOMPLETE_CAPPED_DIAGNOSTIC_NO_THEORY_FAILURE",
+              "claim_ceiling": "DOWNLOAD_ONLY_NO_OSA_NO_SPI511_MEASUREMENT_NOT_PROOF"
+          }
+          (OUT / "download_summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
+          print(json.dumps(summary, indent=2, sort_keys=True))
           PY
 
-          cat > "$RUN_ID/scripts/osa_command_bootstrap.sh" <<'SH'
-          #!/usr/bin/env bash
-          set +e
-          for s in /etc/profile /init.d/*.sh /home/integral/.bashrc /home/integral/.profile /opt/osa*/*.sh /opt/osa*/bin/*.sh; do
-            [ -f "$s" ] && . "$s" >/dev/null 2>&1
-          done
-          for cmd in og_create spibounds spihist plist dal_list; do
-            p="$(find / -type f -name "$cmd" 2>/dev/null | head -1)"
-            [ -n "$p" ] && export PATH="$(dirname "$p"):$PATH"
-          done
-          export HEADASNOQUERY=1
-          export HEADASPROMPT=/dev/null
-          command -v og_create || true
-          command -v spibounds || true
-          command -v spihist || true
-          if command -v og_create >/dev/null 2>&1 && command -v spibounds >/dev/null 2>&1 && command -v spihist >/dev/null 2>&1; then exit 0; else exit 17; fi
-          SH
-          chmod +x "$RUN_ID/scripts/osa_command_bootstrap.sh"
-
-          cat > "$RUN_ID/scripts/dynamic_direct_spi_inner.sh" <<'SH'
-          #!/usr/bin/env bash
-          set +e
-          export HEADASNOQUERY=1
-          export HEADASPROMPT=/dev/null
-          cd /home/integral/R22F_R10B_R16_SPI511_ROBUST_REFERENCED_DOWNLOAD_DYNAMIC_SPI_EXECUTION || exit 80
-          bash scripts/osa_command_bootstrap.sh || exit 81
-          og_create idxSwg="scw_dol.list" instrument="SPI" ogid="r10b_r16_og" baseDir="."
-          og_rc=$?; echo "$og_rc" > logs/og_create_exit_code.txt
-          if [ "$og_rc" != "0" ]; then exit "$og_rc"; fi
-          echo "true" > OG_CREATE_PASS.flag
-          cd obs/r10b_r16_og || exit 82
-          mkdir -p spi ../../logs/pars
-          plist spibounds 2>&1 | tee ../../logs/plist_spibounds.log
-          plist spihist 2>&1 | tee ../../logs/plist_spihist.log
-          SPB_PAR="$(find /home/integral/pfiles / -name 'spibounds.par' 2>/dev/null | head -1)"
-          SPH_PAR="$(find /home/integral/pfiles / -name 'spihist.par' 2>/dev/null | head -1)"
-          [ -s "$SPB_PAR" ] && cp "$SPB_PAR" ../../logs/pars/spibounds.par
-          [ -s "$SPH_PAR" ] && cp "$SPH_PAR" ../../logs/pars/spihist.par
-          par_has() { grep -q "^$2," "$1"; }
-          choose_name() { par="$1"; shift; for n in "$@"; do if par_has "$par" "$n"; then echo "$n"; return 0; fi; done; return 1; }
-          add_if_present() { arrname="$1"; par="$2"; val="$3"; shift 3; n="$(choose_name "$par" "$@")"; if [ -n "$n" ]; then eval "$arrname+=(\"$n=$val\")"; echo "ADD $n=$val" >> ../../logs/dynamic_param_build.log; else echo "SKIP $*" >> ../../logs/dynamic_param_build.log; fi; }
-          : > ../../logs/dynamic_param_build.log
-          spb_cmd=()
-          add_if_present spb_cmd "$SPB_PAR" "" outfile
-          add_if_present spb_cmd "$SPB_PAR" "" in-og-dol inogdol
-          add_if_present spb_cmd "$SPB_PAR" "spi/energy_boundaries.fits(SPI.-EBDS-SET.tpl)" energy-boundaries-dol energy_boundaries_dol energyboundariesdol
-          add_if_present spb_cmd "$SPB_PAR" "og_spi.fits[GROUPING]" out-og-dol out_og_dol outogdol
-          add_if_present spb_cmd "$SPB_PAR" "spi/energy_boundaries.fits[1]" ebounds-dol ebounds_dol eboundsdol
-          add_if_present spb_cmd "$SPB_PAR" "yes" clobber
-          add_if_present spb_cmd "$SPB_PAR" "none" binfile
-          add_if_present spb_cmd "$SPB_PAR" "1" nregions
-          add_if_present spb_cmd "$SPB_PAR" "490,532" regions
-          add_if_present spb_cmd "$SPB_PAR" "42" nbins
-          add_if_present spb_cmd "$SPB_PAR" "INTEGRAL" telescope
-          add_if_present spb_cmd "$SPB_PAR" "SPI" instrume instrument
-          add_if_present spb_cmd "$SPB_PAR" "" filter
-          add_if_present spb_cmd "$SPB_PAR" "PI" bintype chantype
-          add_if_present spb_cmd "$SPB_PAR" "20" chatter
-          add_if_present spb_cmd "$SPB_PAR" "h" mode
-          printf 'spibounds'; printf ' %q' "${spb_cmd[@]}"; echo | tee ../../logs/direct_spibounds_command.log
-          spibounds "${spb_cmd[@]}" 2>&1 | tee ../../logs/direct_spibounds.log
-          sb_rc=${PIPESTATUS[0]}; echo "$sb_rc" > ../../logs/direct_spibounds_exit_code.txt
-          if [ "$sb_rc" != "0" ]; then exit "$sb_rc"; fi
-          sph_cmd=()
-          add_if_present sph_cmd "$SPH_PAR" "hist" outfile
-          add_if_present sph_cmd "$SPH_PAR" "" in-og-dol in_og_dol inogdol
-          add_if_present sph_cmd "$SPH_PAR" "spi/evts_det_spec.fits(SPI.-OBS.-DSP.tpl)" det-spec-dol det_spec_dol detspecdol
-          add_if_present sph_cmd "$SPH_PAR" "og_spi.fits[GROUPING]" out-og-dol out_og_dol outogdol
-          add_if_present sph_cmd "$SPH_PAR" "" gti-dol gti_dol gtidol
-          add_if_present sph_cmd "$SPH_PAR" "" deadtime-dol deadtime_dol deadtimedol
-          add_if_present sph_cmd "$SPH_PAR" "spi/energy_boundaries.fits[1]" ebounds-dol ebounds_dol eboundsdol
-          add_if_present sph_cmd "$SPH_PAR" "yes" clobber
-          add_if_present sph_cmd "$SPH_PAR" "1" dtype
-          add_if_present sph_cmd "$SPH_PAR" "raw" psdtype
-          add_if_present sph_cmd "$SPH_PAR" "0-84" detnums
-          add_if_present sph_cmd "$SPH_PAR" "no" detsummed
-          add_if_present sph_cmd "$SPH_PAR" "no" pntgsummed
-          add_if_present sph_cmd "$SPH_PAR" "SPI" instrume instrument
-          add_if_present sph_cmd "$SPH_PAR" "20" chatter
-          add_if_present sph_cmd "$SPH_PAR" "ISDC" outputformat output-format
-          printf 'spihist'; printf ' %q' "${sph_cmd[@]}"; echo | tee ../../logs/direct_spihist_command.log
-          spihist "${sph_cmd[@]}" 2>&1 | tee ../../logs/direct_spihist.log
-          sh_rc=${PIPESTATUS[0]}; echo "$sh_rc" > ../../logs/direct_spihist_exit_code.txt
-          if [ "$sh_rc" = "0" ]; then echo "true" > ../../DIRECT_SPI_PASS.flag; else echo "false" > ../../DIRECT_SPI_PASS.flag; fi
-          exit "$sh_rc"
-          SH
-          chmod +x "$RUN_ID/scripts/dynamic_direct_spi_inner.sh"
-
-          cat > "$RUN_ID/scripts/extract_line_sideband.py" <<'PY'
-          import json, csv
-          from pathlib import Path
-          import numpy as np
-          from astropy.io import fits
-          RUN_ID="R22F_R10B_R16_SPI511_ROBUST_REFERENCED_DOWNLOAD_DYNAMIC_SPI_EXECUTION"
-          ROOT=Path.cwd(); OUT=ROOT/RUN_ID; OBS=OUT/"obs"/"r10b_r16_og"/"spi"
-          LINE=(508.0,514.0); LOW=(490.0,500.0); HIGH=(522.0,532.0); MIN_RATIO=1.2
-          inventory=[]; rows=[]
-          def integrate(e1,e2,y,band):
-              e1=np.asarray(e1,dtype=float); e2=np.asarray(e2,dtype=float); y=np.asarray(y,dtype=float)
-              m=np.isfinite(e1)&np.isfinite(e2)&np.isfinite(y)&(e2>=band[0])&(e1<=band[1])
-              return float(np.nansum(y[m])) if m.any() else None
-          ebounds=[]
-          for p in sorted(OBS.rglob('*.fit*')):
-              try:
-                  hdul=fits.open(p, memmap=False)
-                  for i,h in enumerate(hdul):
-                      names=list(getattr(getattr(h,'data',None),'names',[]) or [])
-                      inventory.append({'file':str(p),'hdu':i,'name':h.name,'columns':'|'.join(names),'nrows':len(h.data) if getattr(h,'data',None) is not None and hasattr(h.data,'__len__') else ''})
-                      data=getattr(h,'data',None)
-                      if data is None or not hasattr(data,'names') or data.names is None: continue
-                      namesU=[n.upper() for n in data.names]
-                      for a,b in [('E_MIN','E_MAX'),('ENERG_LO','ENERG_HI'),('CHANNEL_LO','CHANNEL_HI'),('E_LOW','E_HIGH')]:
-                          if a in namesU and b in namesU:
-                              e1=np.asarray(data[data.names[namesU.index(a)]],dtype=float).ravel(); e2=np.asarray(data[data.names[namesU.index(b)]],dtype=float).ravel()
-                              if len(e1)>0 and len(e1)==len(e2): ebounds.append((p,e1,e2))
-              except Exception as e:
-                  inventory.append({'file':str(p),'hdu':'ERR','name':'ERR','columns':repr(e)[:160],'nrows':''})
-          for dp in sorted(OBS.rglob('*.fit*')):
-              try:
-                  hdul=fits.open(dp, memmap=False)
-                  for hdu_i,h in enumerate(hdul):
-                      data=getattr(h,'data',None)
-                      if data is None or not hasattr(data,'names') or data.names is None: continue
-                      for cname in data.names:
-                          if cname.upper() not in ('COUNTS','COUNT','RATE','SPECTRUM','SPEC','VALUE'): continue
-                          arr=np.asarray(data[cname], dtype=float)
-                          for ep,e1,e2 in ebounds:
-                              n=len(e1); y=None
-                              if arr.ndim==1 and arr.size==n: y=arr
-                              elif arr.ndim>=2:
-                                  for ax,dim in enumerate(arr.shape):
-                                      if dim==n:
-                                          y=np.nansum(np.moveaxis(arr, ax, 0).reshape(n,-1), axis=1); break
-                              if y is None: continue
-                              line=integrate(e1,e2,y,LINE); low=integrate(e1,e2,y,LOW); high=integrate(e1,e2,y,HIGH)
-                              sides=[v for v in [low,high] if v is not None]; side=sum(sides)/len(sides) if sides else None
-                              ratio=(line/side) if (line is not None and side not in (None,0)) else None
-                              rows.append({'method':'paired_ebounds_counts','file':str(dp),'hdu':hdu_i,'column':cname,'ebounds_file':str(ep),'line_508_514':line,'low_490_500':low,'high_522_532':high,'sideband_mean':side,'line_to_sideband_ratio':ratio,'passes_min_ratio':bool(ratio is not None and ratio>=MIN_RATIO)})
-              except Exception: pass
-          with (OUT/'run_output_fits_inventory.csv').open('w',newline='',encoding='utf-8') as f:
-              w=csv.DictWriter(f, fieldnames=['file','hdu','name','columns','nrows']); w.writeheader(); w.writerows(inventory)
-          fields=sorted(set().union(*(r.keys() for r in rows))) if rows else ['method','file','hdu','column','line_508_514','low_490_500','high_522_532','sideband_mean','line_to_sideband_ratio','passes_min_ratio']
-          with (OUT/'line_sideband_candidates.csv').open('w',newline='',encoding='utf-8') as f:
-              w=csv.DictWriter(f, fieldnames=fields); w.writeheader(); w.writerows(rows)
-          valid=[r for r in rows if r.get('line_to_sideband_ratio') not in (None,'')]
-          best=max(valid, key=lambda r: float(r['line_to_sideband_ratio'])) if valid else None
-          status={'candidate_rows':len(rows),'valid_ratio_rows':len(valid),'best_candidate':best,'run_output_fits_files':len({r['file'] for r in inventory}),'claim_ceiling':'RUN_OUTPUT only; not proof without controls'}
-          (OUT/'line_sideband_status.json').write_text(json.dumps(status,indent=2,sort_keys=True),encoding='utf-8')
-          print(json.dumps(status,indent=2,sort_keys=True))
-          PY
-
-      - name: Robust referenced member download gate
+      - name: Run safe capped diagnostic
         shell: bash
+        timeout-minutes: 32
         continue-on-error: true
         run: |
           set +e
-          echo "robust_referenced_download" > "$RUN_ID/RUN_STAGE.txt"
-          export ALLOW_REDOWNLOAD='${{ github.event.inputs.allow_redownload }}'
-          python3 "$RUN_ID/scripts/download_referenced_robust.py" 2>&1 | tee "$RUN_ID/logs/download_referenced_robust.log"
+          timeout 28m python3 "$RUN_ID/scripts/r17b_safe_download.py" 2>&1 | tee "$RUN_ID/logs/r17b_safe_download.log"
           rc=${PIPESTATUS[0]}
-          echo "$rc" > "$RUN_ID/logs/download_referenced_robust_exit_code.txt"
-          if [ "$rc" = "0" ]; then echo "true" > "$RUN_ID/DOWNLOAD_COMPLETE.flag"; else echo "false" > "$RUN_ID/DOWNLOAD_COMPLETE.flag"; fi
-          du -sh "$CACHE" 2>/dev/null | tee "$RUN_ID/logs/cache_size.log" || true
-
-      - name: Fetch and patch OSA wrapper no-TTY
-        shell: bash
-        continue-on-error: true
-        run: |
-          set +e
-          curl -L --retry 3 --retry-delay 5 https://raw.githubusercontent.com/ISDC-integral/osa-docker/master/osa-container.sh -o osa-container.sh 2>&1 | tee "$RUN_ID/logs/osa_wrapper_fetch.log"
-          rc=${PIPESTATUS[0]}; chmod +x osa-container.sh 2>/dev/null || true
-          cp osa-container.sh osa-container.notty.sh
-          sed -i -E 's/(docker run[^\n]*) --rm -it /\1 --rm /g; s/(docker run[^\n]*) --rm -i /\1 --rm /g; s/(docker run[^\n]*) --rm -t /\1 --rm /g; s/ --rm -it / --rm /g; s/ --rm -i / --rm /g; s/ --rm -t / --rm /g; s/ -it / /g' osa-container.notty.sh
-          chmod +x osa-container.notty.sh
-          echo "$rc" > "$RUN_ID/logs/osa_wrapper_fetch_exit_code.txt"
-          if grep -nE 'docker run .* -it|docker run .* --tty|docker run .* --interactive' osa-container.notty.sh > "$RUN_ID/logs/notty_patch_validation.log"; then echo 88 > "$RUN_ID/logs/notty_patch_validation_exit_code.txt"; else echo 0 > "$RUN_ID/logs/notty_patch_validation_exit_code.txt"; echo "NOTTY_PATCH_PASS" > "$RUN_ID/logs/notty_patch_validation.log"; fi
-
-      - name: OSA dynamic preflight
-        shell: bash
-        continue-on-error: true
-        run: |
-          set +e
-          if [ "${{ github.event.inputs.run_osa_after_download }}" != "true" ] || [ "$(cat "$RUN_ID/DOWNLOAD_COMPLETE.flag" 2>/dev/null || echo false)" != "true" ]; then
-            echo "SKIP_PREFLIGHT_DOWNLOAD_INCOMPLETE_OR_DISABLED" | tee "$RUN_ID/logs/osa_command_preflight.log"
-            echo 77 > "$RUN_ID/logs/osa_command_preflight_exit_code.txt"
-            exit 0
+          echo "$rc" > "$RUN_ID/logs/r17b_safe_download_exit_code.txt"
+          if [ -s "$RUN_ID/download_summary.json" ] && grep -q '"download_complete": true' "$RUN_ID/download_summary.json"; then
+            echo "true" > "$RUN_ID/DOWNLOAD_COMPLETE.flag"
+          else
+            echo "false" > "$RUN_ID/DOWNLOAD_COMPLETE.flag"
           fi
-          export OSA_VERSION="11.2"
-          export OSA_DOCKER_IMAGE="integralsw/osa:11.2-2-g667521a3-20220403-190332"
-          export OSA_DOCKER_PULL="no"
-          export REP_BASE_PROD="$PWD/$CACHE"
-          export CURRENT_IC="$PWD/$CACHE"
-          export WORKDIR="$PWD"
-          xvfb-run -a bash ./osa-container.notty.sh docker 'cd /home/integral/'"$RUN_ID"' || exit 80; bash scripts/osa_command_bootstrap.sh' 2>&1 | tee "$RUN_ID/logs/osa_command_preflight.log"
-          rc=${PIPESTATUS[0]}; echo "$rc" > "$RUN_ID/logs/osa_command_preflight_exit_code.txt"
-          if [ "$rc" = "0" ]; then echo "true" > "$RUN_ID/PREFLIGHT_PASS.flag"; else echo "false" > "$RUN_ID/PREFLIGHT_PASS.flag"; fi
-          sudo chown -R "$USER:$USER" . 2>/dev/null || true
+          du -sh ACIRM_CACHE_R10B_* 2>/dev/null | tee "$RUN_ID/logs/cache_sizes_all.log" || true
 
-      - name: Run og_create and dynamic direct SPI only after complete download
-        shell: bash
-        if: ${{ always() }}
-        continue-on-error: true
-        run: |
-          set +e
-          if [ "$(cat "$RUN_ID/PREFLIGHT_PASS.flag" 2>/dev/null || echo false)" != "true" ]; then
-            echo "SKIP_DYNAMIC_DIRECT_SPI_PREFLIGHT_FAILED" | tee "$RUN_ID/logs/dynamic_direct_spi.log"
-            echo 77 > "$RUN_ID/logs/og_create_exit_code.txt"; echo 77 > "$RUN_ID/logs/direct_spibounds_exit_code.txt"; echo 77 > "$RUN_ID/logs/direct_spihist_exit_code.txt"
-            exit 0
-          fi
-          export OSA_VERSION="11.2"
-          export OSA_DOCKER_IMAGE="integralsw/osa:11.2-2-g667521a3-20220403-190332"
-          export OSA_DOCKER_PULL="no"
-          export REP_BASE_PROD="$PWD/$CACHE"
-          export CURRENT_IC="$PWD/$CACHE"
-          export WORKDIR="$PWD"
-          xvfb-run -a bash ./osa-container.notty.sh docker 'bash /home/integral/'"$RUN_ID"'/scripts/dynamic_direct_spi_inner.sh' 2>&1 | tee "$RUN_ID/logs/dynamic_direct_spi.log"
-          rc=${PIPESTATUS[0]}
-          [ -s "$RUN_ID/logs/og_create_exit_code.txt" ] || echo "$rc" > "$RUN_ID/logs/og_create_exit_code.txt"
-          [ -s "$RUN_ID/logs/direct_spibounds_exit_code.txt" ] || echo "$rc" > "$RUN_ID/logs/direct_spibounds_exit_code.txt"
-          [ -s "$RUN_ID/logs/direct_spihist_exit_code.txt" ] || echo "$rc" > "$RUN_ID/logs/direct_spihist_exit_code.txt"
-          sudo chown -R "$USER:$USER" . 2>/dev/null || true
-          find "$RUN_ID/obs" -maxdepth 6 -type f | sort > "$RUN_ID/logs/run_output_files_after_dynamic_direct_spi.txt" || true
-
-      - name: Extract locked 511 line-sideband from RUN_OUTPUT only
-        shell: bash
-        if: ${{ always() }}
-        continue-on-error: true
-        run: |
-          set +e
-          python3 "$RUN_ID/scripts/extract_line_sideband.py" 2>&1 | tee "$RUN_ID/logs/line_sideband_extract.log"
-          echo ${PIPESTATUS[0]} > "$RUN_ID/logs/line_sideband_extract_exit_code.txt"
-
-      - name: Build final guarded decision and slim package
+      - name: Build artifact
         shell: bash
         if: ${{ always() }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import json,csv,hashlib
+          import json, csv, hashlib
           from pathlib import Path
-          RUN_ID="R22F_R10B_R16_SPI511_ROBUST_REFERENCED_DOWNLOAD_DYNAMIC_SPI_EXECUTION"; OUT=Path(RUN_ID)
-          def ri(n):
-              try: return int((OUT/'logs'/n).read_text().strip().splitlines()[-1])
-              except Exception: return None
-          def rb(p):
-              try: return Path(p).read_text().strip().lower()=='true'
-              except Exception: return False
-          dl={}; line={}
-          if (OUT/'swg_referenced_download_status.json').exists():
-              try: dl=json.loads((OUT/'swg_referenced_download_status.json').read_text())
-              except Exception: pass
-          if (OUT/'line_sideband_status.json').exists():
-              try: line=json.loads((OUT/'line_sideband_status.json').read_text())
-              except Exception: pass
-          valid=int(line.get('valid_ratio_rows',0) or 0); best=line.get('best_candidate')
-          download_complete=rb(OUT/'DOWNLOAD_COMPLETE.flag'); pre=rb(OUT/'PREFLIGHT_PASS.flag'); og=rb(OUT/'OG_CREATE_PASS.flag'); direct=rb(OUT/'DIRECT_SPI_PASS.flag')
-          missing=dl.get('missing_member_count')
-          if not download_complete:
-              decision='R22F_R10B_R16_REFERENCED_DOWNLOAD_INCOMPLETE_NO_THEORY_FAILURE'
-          elif not pre:
-              decision='R22F_R10B_R16_OSA_PREFLIGHT_FAILED_NO_THEORY_FAILURE'
-          elif not og:
-              decision='R22F_R10B_R16_OG_CREATE_FAILED_NO_THEORY_FAILURE'
-          elif ri('direct_spibounds_exit_code.txt') not in (0,None):
-              decision='R22F_R10B_R16_SPIBOUNDS_FAILED_NO_THEORY_FAILURE'
-          elif ri('direct_spihist_exit_code.txt') not in (0,None) or not direct:
-              decision='R22F_R10B_R16_SPIHIST_FAILED_NO_THEORY_FAILURE'
-          elif valid and best and best.get('passes_min_ratio'):
-              decision='R22F_R10B_R16_SPI511_RUN_OUTPUT_LINE_SIDEBAND_RATIO_PASS_REQUIRES_CONTROLS_NOT_PROOF'
-          elif valid:
-              decision='R22F_R10B_R16_SPI511_RUN_OUTPUT_LINE_SIDEBAND_RATIO_AVAILABLE_NOT_PRODUCT_PROOF_AUDIT_REQUIRED'
-          else:
-              decision='R22F_R10B_R16_NO_USABLE_RUN_OUTPUT_LINE_SIDEBAND_EXTRACTED_NO_THEORY_FAILURE'
-          status={'run_id':RUN_ID,'decision':decision,'download_complete':download_complete,'missing_member_count':missing,'required_member_count':dl.get('required_member_count'),'downloaded_or_cached_files':dl.get('downloaded_or_cached_files'),'preflight_pass':pre,'og_create_pass':og,'direct_spi_pass':direct,'download_exit':ri('download_referenced_robust_exit_code.txt'),'osa_preflight_exit':ri('osa_command_preflight_exit_code.txt'),'og_create_exit':ri('og_create_exit_code.txt'),'direct_spibounds_exit':ri('direct_spibounds_exit_code.txt'),'direct_spihist_exit':ri('direct_spihist_exit_code.txt'),'line_sideband_extract_exit':ri('line_sideband_extract_exit_code.txt'),'valid_ratio_rows':valid,'best_candidate':best,'claim_ceiling':'ROBUST_REFERENCED_DOWNLOAD_DYNAMIC_SPI_RUN_OUTPUT_NOT_PROOF_NOT_FINAL_LAW','raw_heavy_files_packaged':False,'no_rescue_applied':True}
-          (OUT/'STATUS.json').write_text(json.dumps(status,indent=2,sort_keys=True),encoding='utf-8')
-          with (OUT/'R22F_R10B_R16_GO_NO_GO_DECISION.csv').open('w',newline='',encoding='utf-8') as f:
-              w=csv.DictWriter(f,fieldnames=list(status.keys())); w.writeheader(); w.writerow(status)
+          RUN_ID="R22F_R10B_R17B_SAFE_DOWNLOAD_DIAGNOSTIC"
+          OUT=Path(RUN_ID)
+          summary={}
+          if (OUT/"download_summary.json").exists():
+              try:
+                  summary=json.loads((OUT/"download_summary.json").read_text())
+              except Exception:
+                  summary={}
+          try:
+              exit_code=(OUT/"logs/r17b_safe_download_exit_code.txt").read_text().strip()
+          except Exception:
+              exit_code=None
+          try:
+              complete=(OUT/"DOWNLOAD_COMPLETE.flag").read_text().strip()=="true"
+          except Exception:
+              complete=False
+          status={
+              "run_id":RUN_ID,
+              "decision":summary.get("decision", "R17B_SCRIPT_ABORTED_OR_TIMEOUT_ARTIFACT_FOR_DIAGNOSTIC_NO_THEORY_FAILURE"),
+              "download_complete":complete,
+              "download_step_exit_code":exit_code,
+              "swg_missing_count":summary.get("swg_missing_count"),
+              "required_member_count":summary.get("required_member_count"),
+              "missing_member_count":summary.get("missing_member_count"),
+              "claim_ceiling":"DOWNLOAD_ONLY_NO_OSA_NO_SPI511_MEASUREMENT_NOT_PROOF"
+          }
+          (OUT/"STATUS.json").write_text(json.dumps(status, indent=2, sort_keys=True), encoding="utf-8")
+          with (OUT/"R17B_GO_NO_GO_DECISION.csv").open("w", newline="", encoding="utf-8") as f:
+              w=csv.DictWriter(f, fieldnames=list(status.keys()))
+              w.writeheader(); w.writerow(status)
           rows=[]
-          for p in sorted(OUT.rglob('*')):
-              if p.is_file(): rows.append({'file':str(p.relative_to(OUT)),'sha256':hashlib.sha256(p.read_bytes()).hexdigest(),'bytes':p.stat().st_size})
-          with (OUT/'MANIFEST_SHA256.csv').open('w',newline='',encoding='utf-8') as f:
-              w=csv.DictWriter(f,fieldnames=['file','sha256','bytes']); w.writeheader(); w.writerows(rows)
-          print(json.dumps(status,indent=2,sort_keys=True))
+          for p in sorted(OUT.rglob("*")):
+              if p.is_file():
+                  rows.append({"file":str(p.relative_to(OUT)),"sha256":hashlib.sha256(p.read_bytes()).hexdigest(),"bytes":p.stat().st_size})
+          with (OUT/"MANIFEST_SHA256.csv").open("w", newline="", encoding="utf-8") as f:
+              w=csv.DictWriter(f, fieldnames=["file","sha256","bytes"])
+              w.writeheader(); w.writerows(rows)
+          print(json.dumps(status, indent=2, sort_keys=True))
           PY
-          ZIP="${RUN_ID}_RESULTS.zip"; SHA="${ZIP}.sha256.txt"
+          ZIP="${RUN_ID}_RESULTS.zip"
+          SHA="${ZIP}.sha256.txt"
           zip -r "$ZIP" "$RUN_ID" -x "*/__pycache__/*" >/dev/null
           sha256sum "$ZIP" > "$SHA"
           cat "$SHA"
 
-      - name: Upload slim results artifact
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         if: ${{ always() }}
         with:
-          name: R22F_R10B_R16_SPI511_ROBUST_REFERENCED_DOWNLOAD_DYNAMIC_SPI_RESULTS
+          name: R22F_R10B_R17B_SAFE_DOWNLOAD_DIAGNOSTIC_RESULTS
           path: |
-            R22F_R10B_R16_SPI511_ROBUST_REFERENCED_DOWNLOAD_DYNAMIC_SPI_EXECUTION_RESULTS.zip
-            R22F_R10B_R16_SPI511_ROBUST_REFERENCED_DOWNLOAD_DYNAMIC_SPI_EXECUTION_RESULTS.zip.sha256.txt
+            R22F_R10B_R17B_SAFE_DOWNLOAD_DIAGNOSTIC_RESULTS.zip
+            R22F_R10B_R17B_SAFE_DOWNLOAD_DIAGNOSTIC_RESULTS.zip.sha256.txt
           if-no-files-found: error
           retention-days: 14

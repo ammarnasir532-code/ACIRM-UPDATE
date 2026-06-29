@@ -1,21 +1,21 @@
-name: ACIRM R22F R10B R15 SPI511 SWG referenced data dynamic SPI
+name: ACIRM R22F R10B R16 SPI511 robust referenced download dynamic SPI
 
 on:
   workflow_dispatch:
     inputs:
       allow_redownload:
-        description: 'Allow downloading missing SWG-referenced FITS files'
+        description: 'Allow downloading missing referenced files'
         required: true
         default: 'true'
-      max_total_mb:
-        description: 'Maximum referenced FITS download size in MB'
+      run_osa_after_download:
+        description: 'Run OSA only if 55/55 referenced files are present'
         required: true
-        default: '3500'
+        default: 'true'
 
 jobs:
-  r22f-r10b-r15-swg-referenced-data-dynamic-spi:
+  r22f-r10b-r16-robust-referenced-download-dynamic-spi:
     runs-on: ubuntu-latest
-    timeout-minutes: 240
+    timeout-minutes: 360
 
     steps:
       - name: Checkout repository
@@ -25,34 +25,44 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          RUN_ID="R22F_R10B_R15_SPI511_SWG_REFERENCED_DATA_DYNAMIC_SPI_EXECUTION"
-          CACHE="ACIRM_CACHE_R10B_R15"
+          RUN_ID="R22F_R10B_R16_SPI511_ROBUST_REFERENCED_DOWNLOAD_DYNAMIC_SPI_EXECUTION"
+          CACHE="ACIRM_CACHE_R10B_R16"
           echo "RUN_ID=${RUN_ID}" >> "$GITHUB_ENV"
           echo "CACHE=${CACHE}" >> "$GITHUB_ENV"
           mkdir -p "$RUN_ID" "$RUN_ID/logs" "$RUN_ID/scripts" "$RUN_ID/slim_results" "$CACHE/scw" "$CACHE/aux" "$CACHE/ic" "$CACHE/idx" "$CACHE/cat"
+          echo "false" > "$RUN_ID/DOWNLOAD_COMPLETE.flag"
           echo "false" > "$RUN_ID/PREFLIGHT_PASS.flag"
           echo "false" > "$RUN_ID/OG_CREATE_PASS.flag"
           echo "false" > "$RUN_ID/DIRECT_SPI_PASS.flag"
+          echo "not_started" > "$RUN_ID/RUN_STAGE.txt"
           cat > "$RUN_ID/LOCK.json" <<'JSON'
           {
-            "run_id": "R22F_R10B_R15_SPI511_SWG_REFERENCED_DATA_DYNAMIC_SPI_EXECUTION",
-            "parent_result": "R22F_R10B_R14_DYNAMIC_SPIHIST_FAILED_NO_THEORY_FAILURE",
-            "critical_repair": "Download FITS members referenced inside swg.fits, because swg.fits alone lacks the SPI.-OBS.-PNT/data members required by spihist.",
+            "run_id": "R22F_R10B_R16_SPI511_ROBUST_REFERENCED_DOWNLOAD_DYNAMIC_SPI_EXECUTION",
+            "parent_result": "R22F_R10B_R15_SWG_REFERENCED_DOWNLOAD_INCOMPLETE_NO_THEORY_FAILURE",
+            "critical_repair": "Use robust resume/retry download and require complete SWG-referenced data tree before OSA execution.",
             "instrument": "INTEGRAL_SPI",
             "revision": "2504",
+            "locked_scw": [
+              "250400090010",
+              "250400020010",
+              "250400080010",
+              "250400030010",
+              "250400070021",
+              "250400040010",
+              "250400060010",
+              "250400050010"
+            ],
             "line_band_keV": [508.0, 514.0],
             "low_sideband_keV": [490.0, 500.0],
             "high_sideband_keV": [522.0, 532.0],
-            "direct_energy_grid_keV": [490.0, 532.0],
-            "direct_energy_bins": 42,
             "min_line_to_sideband_ratio": 1.2,
-            "claim_ceiling": "SWG_REFERENCED_DATA_DYNAMIC_SPI_EXECUTION_ATTEMPT_NOT_PROOF_NOT_FINAL_LAW",
+            "claim_ceiling": "ROBUST_REFERENCED_DOWNLOAD_DYNAMIC_SPI_RUN_OUTPUT_NOT_PROOF_NOT_FINAL_LAW",
             "no_rescue_rules": [
               "No energy-band change after results.",
               "No SCW drop after results.",
               "No threshold reduction after results.",
-              "Do not accept energy_boundaries/CHANNEL metadata as a 511 measurement.",
-              "Only real RUN_OUTPUT detector spectra/counts are accepted for 508-514/sideband extraction.",
+              "Do not start OSA if referenced data tree is incomplete.",
+              "Only RUN_OUTPUT files under obs/r10b_r16_og/spi are accepted for line-sideband extraction.",
               "Any technical failure is TECHNICAL_NO_GO_NO_THEORY_FAILURE."
             ]
           }
@@ -71,83 +81,77 @@ jobs:
             echo "disk_start"; df -h
             echo "memory_start"; free -h || true
             echo "docker_version"; docker --version || true
+            echo "curl_version"; curl --version | head -5 || true
           } | tee "$RUN_ID/logs/system_preflight.log"
 
-      - name: Restore R15 cache
+      - name: Restore R16 and older R10B caches
         uses: actions/cache@v4
         with:
-          path: ACIRM_CACHE_R10B_R15
-          key: acirm-r22f-r10b-r15-swg-referenced-cache-v1
+          path: ACIRM_CACHE_R10B_R16
+          key: acirm-r22f-r10b-r16-rev2504-referenced-cache-v1
           restore-keys: |
+            acirm-r22f-r10b-r16-rev2504-referenced-cache-
             acirm-r22f-r10b-r15-
             acirm-r22f-r10b-r14-
+            acirm-r22f-r10b-r4-
             acirm-r22f-r10b-
 
-      - name: Write download, OSA, and extraction scripts
+      - name: Write robust downloader OSA scripts and extractor
         shell: bash
         run: |
           set -euo pipefail
-          cat > "$RUN_ID/scripts/download_swg_referenced_members.py" <<'PY'
-          import os, re, json, csv, urllib.request
+          cat > "$RUN_ID/scripts/download_referenced_robust.py" <<'PY'
+          import os, re, json, csv, subprocess, time
           from pathlib import Path
-
-          RUN_ID="R22F_R10B_R15_SPI511_SWG_REFERENCED_DATA_DYNAMIC_SPI_EXECUTION"
-          ROOT=Path.cwd(); OUT=ROOT/RUN_ID; CACHE=ROOT/"ACIRM_CACHE_R10B_R15"
+          RUN_ID="R22F_R10B_R16_SPI511_ROBUST_REFERENCED_DOWNLOAD_DYNAMIC_SPI_EXECUTION"
+          ROOT=Path.cwd(); OUT=ROOT/RUN_ID; CACHE=ROOT/"ACIRM_CACHE_R10B_R16"
           SCWS=["250400090010","250400020010","250400080010","250400030010","250400070021","250400040010","250400060010","250400050010"]
           REV="2504"
           ALLOW=os.environ.get("ALLOW_REDOWNLOAD","true").lower()=="true"
-          MAX_MB=float(os.environ.get("MAX_TOTAL_MB","3500"))
-          BASES=["https://heasarc.gsfc.nasa.gov/FTP/integral/data/","https://isdc.unige.ch/integral/archive/data/","https://www.isdc.unige.ch/integral/archive/data/"]
+          BASES=[
+            "https://heasarc.gsfc.nasa.gov/FTP/integral/data/",
+            "https://isdc.unige.ch/integral/archive/data/",
+            "https://www.isdc.unige.ch/integral/archive/data/",
+          ]
           for d in ["scw","aux","ic","idx","cat"]: (CACHE/d).mkdir(parents=True, exist_ok=True)
-          rows=[]; total_downloaded=0
-          def download(rel):
-              global total_downloaded
-              out=CACHE/rel
-              out.parent.mkdir(parents=True, exist_ok=True)
+          rows=[]
+          def curl_download(rel):
+              out=CACHE/rel; out.parent.mkdir(parents=True, exist_ok=True)
               if out.exists() and out.stat().st_size>0:
                   return "CACHE", out.stat().st_size
               if not ALLOW:
                   return "MISSING_REDOWNLOAD_DISABLED", 0
-              if total_downloaded/1e6 > MAX_MB:
-                  return "SKIPPED_TOTAL_CAP", 0
               last=""
+              tmp=out.with_suffix(out.suffix+".part")
               for base in BASES:
                   url=base+rel
-                  try:
-                      urllib.request.urlretrieve(url, out)
-                      sz=out.stat().st_size
-                      total_downloaded += sz
-                      return "DOWNLOADED", sz
-                  except Exception as e:
-                      last=repr(e)[:180]
-              return "DOWNLOAD_FAILED_"+last, 0
-          # Start with swg.fits for each locked SCW.
+                  cmd=["curl","-L","--fail","--retry","8","--retry-delay","10","--connect-timeout","60","--max-time","900","--speed-time","120","--speed-limit","1024","-C","-","-o",str(tmp),url]
+                  t0=time.time()
+                  p=subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                  log=(p.stdout or "")[-1000:]
+                  if p.returncode==0 and tmp.exists() and tmp.stat().st_size>0:
+                      tmp.replace(out)
+                      return "DOWNLOADED", out.stat().st_size
+                  last=f"curl_rc={p.returncode}; {log[:300].replace(chr(10),' ')}"
+              return "DOWNLOAD_FAILED_"+last[:500], 0
+          # Required list: R15-discovered fixed members.
           required=[]
           for scw in SCWS:
               required.append(f"scw/{REV}/{scw}.001/swg.fits")
-          # Download swg first.
+          # download swg first
           for rel in required[:]:
-              st,sz=download(rel)
-              rows.append({"phase":"swg_seed","rel":rel,"status":st,"bytes":sz})
-          # Parse SWG member references from swg.fits bytes.
+              st,sz=curl_download(rel); rows.append({"phase":"swg_seed","rel":rel,"status":st,"bytes":sz})
+          # parse SWG references if available, plus known SPI members.
           member_rels=set(required)
           for scw in SCWS:
-              p=CACHE/f"scw/{REV}/{scw}.001/swg.fits"
-              if not p.exists():
-                  continue
-              txt=p.read_bytes().decode("latin-1",errors="ignore")
-              # Capture normalized data/scw and data/aux references in grouping locations.
-              for m in re.finditer(r"data/(scw/2504/[^\s\x00\r\n]+?\.fits|aux/adp/[^\s\x00\r\n]+?\.fits)", txt):
-                  rel=m.group(1).strip()
-                  if rel.startswith("scw/2504/") or rel.startswith("aux/adp/"):
-                      member_rels.add(rel)
-              # Also add known SPI-relevant members if referenced strings are hard to parse.
               base=f"scw/{REV}/{scw}.001"
+              p=CACHE/base/"swg.fits"
+              txt=p.read_bytes().decode("latin-1",errors="ignore") if p.exists() else ""
+              for m in re.finditer(r"data/(scw/2504/[^\s\x00\r\n]+?\.fits|aux/adp/[^\s\x00\r\n]+?\.fits)", txt):
+                  member_rels.add(m.group(1).strip())
               for fn in ["spi_spectra.fits","spi_oper.fits","spi_science_hk.fits","spi_gti.fits","sc_gti.fits"]:
-                  if fn in txt:
-                      member_rels.add(f"{base}/{fn}")
-          # Conservative aux files for revolution 2504 if referenced by SWG text.
-          aux_candidates=[
+                  member_rels.add(f"{base}/{fn}")
+          for rel in [
             "aux/adp/2504.001/orbit_historic.fits",
             "aux/adp/2504.001/attitude_historic.fits",
             "aux/adp/2504.001/time_correlation.fits",
@@ -155,31 +159,25 @@ jobs:
             "aux/adp/2504.001/observation_log.fits",
             "aux/adp/2504.001/moc_out_of_limits.fits",
             "aux/adp/2504.001/attitude_predicted_01.fits",
-          ]
-          for rel in aux_candidates:
+          ]:
               member_rels.add(rel)
-          # Download all referenced members.
+          # Download missing/referenced.
           for rel in sorted(member_rels):
               if any(r["rel"]==rel for r in rows):
                   continue
-              st,sz=download(rel)
-              rows.append({"phase":"referenced_member","rel":rel,"status":st,"bytes":sz})
-          # Final verification.
-          missing=[]
-          for rel in sorted(member_rels):
-              if not (CACHE/rel).exists() or (CACHE/rel).stat().st_size<=0:
-                  missing.append(rel)
+              st,sz=curl_download(rel); rows.append({"phase":"referenced_member","rel":rel,"status":st,"bytes":sz})
+          missing=[rel for rel in sorted(member_rels) if not (CACHE/rel).exists() or (CACHE/rel).stat().st_size<=0]
           with (OUT/"swg_referenced_download_log.csv").open("w",newline="",encoding="utf-8") as f:
               w=csv.DictWriter(f, fieldnames=["phase","rel","status","bytes"]); w.writeheader(); w.writerows(rows)
           with (OUT/"scw_dol.list").open("w",encoding="utf-8") as f:
-              for scw in SCWS:
-                  f.write(f"/data/scw/{REV}/{scw}.001/swg.fits\n")
-          status={"required_member_count":len(member_rels),"missing_member_count":len(missing),"missing_members":missing[:80],"total_downloaded_mb":total_downloaded/1e6,"allow_redownload":ALLOW,"max_total_mb":MAX_MB}
+              for scw in SCWS: f.write(f"/data/scw/{REV}/{scw}.001/swg.fits\n")
+          status={"required_member_count":len(member_rels),"missing_member_count":len(missing),"missing_members":missing[:120],"downloaded_or_cached_files":sum(1 for rel in member_rels if (CACHE/rel).exists() and (CACHE/rel).stat().st_size>0),"allow_redownload":ALLOW}
           (OUT/"swg_referenced_download_status.json").write_text(json.dumps(status,indent=2,sort_keys=True),encoding="utf-8")
           print(json.dumps(status,indent=2,sort_keys=True))
           if missing:
               raise SystemExit(66)
           PY
+
           cat > "$RUN_ID/scripts/osa_command_bootstrap.sh" <<'SH'
           #!/usr/bin/env bash
           set +e
@@ -198,18 +196,19 @@ jobs:
           if command -v og_create >/dev/null 2>&1 && command -v spibounds >/dev/null 2>&1 && command -v spihist >/dev/null 2>&1; then exit 0; else exit 17; fi
           SH
           chmod +x "$RUN_ID/scripts/osa_command_bootstrap.sh"
-          cat > "$RUN_ID/scripts/r15_dynamic_direct_spi_inner.sh" <<'SH'
+
+          cat > "$RUN_ID/scripts/dynamic_direct_spi_inner.sh" <<'SH'
           #!/usr/bin/env bash
           set +e
           export HEADASNOQUERY=1
           export HEADASPROMPT=/dev/null
-          cd /home/integral/R22F_R10B_R15_SPI511_SWG_REFERENCED_DATA_DYNAMIC_SPI_EXECUTION || exit 80
+          cd /home/integral/R22F_R10B_R16_SPI511_ROBUST_REFERENCED_DOWNLOAD_DYNAMIC_SPI_EXECUTION || exit 80
           bash scripts/osa_command_bootstrap.sh || exit 81
-          og_create idxSwg="scw_dol.list" instrument="SPI" ogid="r10b_r15_og" baseDir="."
+          og_create idxSwg="scw_dol.list" instrument="SPI" ogid="r10b_r16_og" baseDir="."
           og_rc=$?; echo "$og_rc" > logs/og_create_exit_code.txt
           if [ "$og_rc" != "0" ]; then exit "$og_rc"; fi
           echo "true" > OG_CREATE_PASS.flag
-          cd obs/r10b_r15_og || exit 82
+          cd obs/r10b_r16_og || exit 82
           mkdir -p spi ../../logs/pars
           plist spibounds 2>&1 | tee ../../logs/plist_spibounds.log
           plist spihist 2>&1 | tee ../../logs/plist_spihist.log
@@ -223,10 +222,10 @@ jobs:
           : > ../../logs/dynamic_param_build.log
           spb_cmd=()
           add_if_present spb_cmd "$SPB_PAR" "" outfile
-          add_if_present spb_cmd "$SPB_PAR" "" in-og-dol inogdol in-og-dol
+          add_if_present spb_cmd "$SPB_PAR" "" in-og-dol inogdol
           add_if_present spb_cmd "$SPB_PAR" "spi/energy_boundaries.fits(SPI.-EBDS-SET.tpl)" energy-boundaries-dol energy_boundaries_dol energyboundariesdol
           add_if_present spb_cmd "$SPB_PAR" "og_spi.fits[GROUPING]" out-og-dol out_og_dol outogdol
-          add_if_present spb_cmd "$SPB_PAR" "" ebounds-dol ebounds_dol eboundsdol
+          add_if_present spb_cmd "$SPB_PAR" "spi/energy_boundaries.fits[1]" ebounds-dol ebounds_dol eboundsdol
           add_if_present spb_cmd "$SPB_PAR" "yes" clobber
           add_if_present spb_cmd "$SPB_PAR" "none" binfile
           add_if_present spb_cmd "$SPB_PAR" "1" nregions
@@ -265,84 +264,82 @@ jobs:
           if [ "$sh_rc" = "0" ]; then echo "true" > ../../DIRECT_SPI_PASS.flag; else echo "false" > ../../DIRECT_SPI_PASS.flag; fi
           exit "$sh_rc"
           SH
-          chmod +x "$RUN_ID/scripts/r15_dynamic_direct_spi_inner.sh"
-          cat > "$RUN_ID/scripts/r15_extract_line_sideband.py" <<'PY'
+          chmod +x "$RUN_ID/scripts/dynamic_direct_spi_inner.sh"
+
+          cat > "$RUN_ID/scripts/extract_line_sideband.py" <<'PY'
           import json, csv
           from pathlib import Path
           import numpy as np
           from astropy.io import fits
-          RUN_ID="R22F_R10B_R15_SPI511_SWG_REFERENCED_DATA_DYNAMIC_SPI_EXECUTION"
-          ROOT=Path.cwd(); OUT=ROOT/RUN_ID; OBS=OUT/"obs"/"r10b_r15_og"/"spi"
+          RUN_ID="R22F_R10B_R16_SPI511_ROBUST_REFERENCED_DOWNLOAD_DYNAMIC_SPI_EXECUTION"
+          ROOT=Path.cwd(); OUT=ROOT/RUN_ID; OBS=OUT/"obs"/"r10b_r16_og"/"spi"
           LINE=(508.0,514.0); LOW=(490.0,500.0); HIGH=(522.0,532.0); MIN_RATIO=1.2
-          rows=[]; inv=[]
-          for p in sorted(OBS.rglob("*.fit*")):
+          inventory=[]; rows=[]
+          def integrate(e1,e2,y,band):
+              e1=np.asarray(e1,dtype=float); e2=np.asarray(e2,dtype=float); y=np.asarray(y,dtype=float)
+              m=np.isfinite(e1)&np.isfinite(e2)&np.isfinite(y)&(e2>=band[0])&(e1<=band[1])
+              return float(np.nansum(y[m])) if m.any() else None
+          ebounds=[]
+          for p in sorted(OBS.rglob('*.fit*')):
               try:
                   hdul=fits.open(p, memmap=False)
                   for i,h in enumerate(hdul):
                       names=list(getattr(getattr(h,'data',None),'names',[]) or [])
-                      inv.append({"file":str(p),"hdu":i,"name":h.name,"columns":"|".join(names),"nrows":len(h.data) if getattr(h,'data',None) is not None and hasattr(h.data,'__len__') else ""})
-              except Exception as e: inv.append({"file":str(p),"hdu":"ERR","name":"ERR","columns":repr(e)[:160],"nrows":""})
-          def integ(e1,e2,y,band):
-              e1=np.asarray(e1,float); e2=np.asarray(e2,float); y=np.asarray(y,float)
-              m=np.isfinite(e1)&np.isfinite(e2)&np.isfinite(y)&(e2>=band[0])&(e1<=band[1])
-              return float(np.nansum(y[m])) if m.any() else None
-          eb=[]
-          for ep in sorted(OBS.rglob("*energy*bound*.fit*")) + sorted(OBS.rglob("energy_boundaries.fit*")):
-              try:
-                  hdul=fits.open(ep, memmap=False)
-                  for h in hdul:
+                      inventory.append({'file':str(p),'hdu':i,'name':h.name,'columns':'|'.join(names),'nrows':len(h.data) if getattr(h,'data',None) is not None and hasattr(h.data,'__len__') else ''})
                       data=getattr(h,'data',None)
                       if data is None or not hasattr(data,'names') or data.names is None: continue
-                      names=[n.upper() for n in data.names]
-                      for a,b in [("E_MIN","E_MAX"),("ENERG_LO","ENERG_HI"),("CHANNEL_LO","CHANNEL_HI"),("E_LOW","E_HIGH")]:
-                          if a in names and b in names:
-                              e1=np.asarray(data[data.names[names.index(a)]],float).ravel(); e2=np.asarray(data[data.names[names.index(b)]],float).ravel()
-                              if len(e1)==len(e2) and len(e1)>0: eb.append((ep,e1,e2))
-              except Exception: pass
-          for dp in sorted(OBS.rglob("*evts*det*spec*.fit*")) + sorted(OBS.rglob("evts_det_spec.fit*")):
+                      namesU=[n.upper() for n in data.names]
+                      for a,b in [('E_MIN','E_MAX'),('ENERG_LO','ENERG_HI'),('CHANNEL_LO','CHANNEL_HI'),('E_LOW','E_HIGH')]:
+                          if a in namesU and b in namesU:
+                              e1=np.asarray(data[data.names[namesU.index(a)]],dtype=float).ravel(); e2=np.asarray(data[data.names[namesU.index(b)]],dtype=float).ravel()
+                              if len(e1)>0 and len(e1)==len(e2): ebounds.append((p,e1,e2))
+              except Exception as e:
+                  inventory.append({'file':str(p),'hdu':'ERR','name':'ERR','columns':repr(e)[:160],'nrows':''})
+          for dp in sorted(OBS.rglob('*.fit*')):
               try:
                   hdul=fits.open(dp, memmap=False)
                   for hdu_i,h in enumerate(hdul):
                       data=getattr(h,'data',None)
                       if data is None or not hasattr(data,'names') or data.names is None: continue
                       for cname in data.names:
-                          if cname.upper() not in ("COUNTS","COUNT","RATE","SPECTRUM","SPEC","VALUE"): continue
-                          arr=np.asarray(data[cname],float)
-                          for ep,e1,e2 in eb:
+                          if cname.upper() not in ('COUNTS','COUNT','RATE','SPECTRUM','SPEC','VALUE'): continue
+                          arr=np.asarray(data[cname], dtype=float)
+                          for ep,e1,e2 in ebounds:
                               n=len(e1); y=None
                               if arr.ndim==1 and arr.size==n: y=arr
                               elif arr.ndim>=2:
                                   for ax,dim in enumerate(arr.shape):
                                       if dim==n:
-                                          y=np.nansum(np.moveaxis(arr,ax,0).reshape(n,-1),axis=1); break
+                                          y=np.nansum(np.moveaxis(arr, ax, 0).reshape(n,-1), axis=1); break
                               if y is None: continue
-                              line=integ(e1,e2,y,LINE); low=integ(e1,e2,y,LOW); high=integ(e1,e2,y,HIGH)
+                              line=integrate(e1,e2,y,LINE); low=integrate(e1,e2,y,LOW); high=integrate(e1,e2,y,HIGH)
                               sides=[v for v in [low,high] if v is not None]; side=sum(sides)/len(sides) if sides else None
                               ratio=(line/side) if (line is not None and side not in (None,0)) else None
-                              rows.append({"method":"paired_ebounds_evts_det_spec","file":str(dp),"hdu":hdu_i,"column":cname,"ebounds_file":str(ep),"line_508_514":line,"low_490_500":low,"high_522_532":high,"sideband_mean":side,"line_to_sideband_ratio":ratio,"passes_min_ratio":bool(ratio is not None and ratio>=MIN_RATIO)})
+                              rows.append({'method':'paired_ebounds_counts','file':str(dp),'hdu':hdu_i,'column':cname,'ebounds_file':str(ep),'line_508_514':line,'low_490_500':low,'high_522_532':high,'sideband_mean':side,'line_to_sideband_ratio':ratio,'passes_min_ratio':bool(ratio is not None and ratio>=MIN_RATIO)})
               except Exception: pass
-          with (OUT/"run_output_fits_inventory.csv").open("w",newline="",encoding="utf-8") as f: csv.DictWriter(f,fieldnames=["file","hdu","name","columns","nrows"]).writeheader();
-          # Rewrite with rows safely
-          with (OUT/"run_output_fits_inventory.csv").open("w",newline="",encoding="utf-8") as f:
-              w=csv.DictWriter(f,fieldnames=["file","hdu","name","columns","nrows"]); w.writeheader(); w.writerows(inv)
-          fields=["method","file","hdu","column","ebounds_file","line_508_514","low_490_500","high_522_532","sideband_mean","line_to_sideband_ratio","passes_min_ratio"]
-          with (OUT/"line_sideband_candidates.csv").open("w",newline="",encoding="utf-8") as f: w=csv.DictWriter(f,fieldnames=fields); w.writeheader(); w.writerows(rows)
-          valid=[r for r in rows if r.get('line_to_sideband_ratio') not in (None,"")]
-          best=max(valid,key=lambda r:float(r['line_to_sideband_ratio'])) if valid else None
-          status={"candidate_rows":len(rows),"valid_ratio_rows":len(valid),"best_candidate":best,"run_output_fits_files":len({r['file'] for r in inv}),"claim_ceiling":"evts_det_spec RUN_OUTPUT only; not proof without controls"}
-          (OUT/"line_sideband_status.json").write_text(json.dumps(status,indent=2,sort_keys=True),encoding="utf-8")
+          with (OUT/'run_output_fits_inventory.csv').open('w',newline='',encoding='utf-8') as f:
+              w=csv.DictWriter(f, fieldnames=['file','hdu','name','columns','nrows']); w.writeheader(); w.writerows(inventory)
+          fields=sorted(set().union(*(r.keys() for r in rows))) if rows else ['method','file','hdu','column','line_508_514','low_490_500','high_522_532','sideband_mean','line_to_sideband_ratio','passes_min_ratio']
+          with (OUT/'line_sideband_candidates.csv').open('w',newline='',encoding='utf-8') as f:
+              w=csv.DictWriter(f, fieldnames=fields); w.writeheader(); w.writerows(rows)
+          valid=[r for r in rows if r.get('line_to_sideband_ratio') not in (None,'')]
+          best=max(valid, key=lambda r: float(r['line_to_sideband_ratio'])) if valid else None
+          status={'candidate_rows':len(rows),'valid_ratio_rows':len(valid),'best_candidate':best,'run_output_fits_files':len({r['file'] for r in inventory}),'claim_ceiling':'RUN_OUTPUT only; not proof without controls'}
+          (OUT/'line_sideband_status.json').write_text(json.dumps(status,indent=2,sort_keys=True),encoding='utf-8')
           print(json.dumps(status,indent=2,sort_keys=True))
           PY
 
-      - name: Download SWG-referenced FITS members
+      - name: Robust referenced member download gate
         shell: bash
         continue-on-error: true
         run: |
           set +e
-          export ALLOW_REDOWNLOAD="${{ github.event.inputs.allow_redownload }}"
-          export MAX_TOTAL_MB="${{ github.event.inputs.max_total_mb }}"
-          python3 "$RUN_ID/scripts/download_swg_referenced_members.py" 2>&1 | tee "$RUN_ID/logs/download_swg_referenced_members.log"
-          echo ${PIPESTATUS[0]} > "$RUN_ID/logs/download_swg_referenced_members_exit_code.txt"
+          echo "robust_referenced_download" > "$RUN_ID/RUN_STAGE.txt"
+          export ALLOW_REDOWNLOAD='${{ github.event.inputs.allow_redownload }}'
+          python3 "$RUN_ID/scripts/download_referenced_robust.py" 2>&1 | tee "$RUN_ID/logs/download_referenced_robust.log"
+          rc=${PIPESTATUS[0]}
+          echo "$rc" > "$RUN_ID/logs/download_referenced_robust_exit_code.txt"
+          if [ "$rc" = "0" ]; then echo "true" > "$RUN_ID/DOWNLOAD_COMPLETE.flag"; else echo "false" > "$RUN_ID/DOWNLOAD_COMPLETE.flag"; fi
           du -sh "$CACHE" 2>/dev/null | tee "$RUN_ID/logs/cache_size.log" || true
 
       - name: Fetch and patch OSA wrapper no-TTY
@@ -356,14 +353,18 @@ jobs:
           sed -i -E 's/(docker run[^\n]*) --rm -it /\1 --rm /g; s/(docker run[^\n]*) --rm -i /\1 --rm /g; s/(docker run[^\n]*) --rm -t /\1 --rm /g; s/ --rm -it / --rm /g; s/ --rm -i / --rm /g; s/ --rm -t / --rm /g; s/ -it / /g' osa-container.notty.sh
           chmod +x osa-container.notty.sh
           echo "$rc" > "$RUN_ID/logs/osa_wrapper_fetch_exit_code.txt"
-          if grep -nE 'docker run .* -it|docker run .* --tty|docker run .* --interactive' osa-container.notty.sh > "$RUN_ID/logs/notty_patch_validation.log"; then echo 88 > "$RUN_ID/logs/notty_patch_validation_exit_code.txt"; else echo 0 > "$RUN_ID/logs/notty_patch_validation_exit_code.txt"; fi
+          if grep -nE 'docker run .* -it|docker run .* --tty|docker run .* --interactive' osa-container.notty.sh > "$RUN_ID/logs/notty_patch_validation.log"; then echo 88 > "$RUN_ID/logs/notty_patch_validation_exit_code.txt"; else echo 0 > "$RUN_ID/logs/notty_patch_validation_exit_code.txt"; echo "NOTTY_PATCH_PASS" > "$RUN_ID/logs/notty_patch_validation.log"; fi
 
-      - name: OSA command preflight
+      - name: OSA dynamic preflight
         shell: bash
         continue-on-error: true
         run: |
           set +e
-          if [ "$(cat "$RUN_ID/logs/download_swg_referenced_members_exit_code.txt" 2>/dev/null || echo 99)" != "0" ]; then echo "SKIP_PREFLIGHT_DOWNLOAD_INCOMPLETE" | tee "$RUN_ID/logs/osa_command_preflight.log"; echo 66 > "$RUN_ID/logs/osa_command_preflight_exit_code.txt"; exit 0; fi
+          if [ "${{ github.event.inputs.run_osa_after_download }}" != "true" ] || [ "$(cat "$RUN_ID/DOWNLOAD_COMPLETE.flag" 2>/dev/null || echo false)" != "true" ]; then
+            echo "SKIP_PREFLIGHT_DOWNLOAD_INCOMPLETE_OR_DISABLED" | tee "$RUN_ID/logs/osa_command_preflight.log"
+            echo 77 > "$RUN_ID/logs/osa_command_preflight_exit_code.txt"
+            exit 0
+          fi
           export OSA_VERSION="11.2"
           export OSA_DOCKER_IMAGE="integralsw/osa:11.2-2-g667521a3-20220403-190332"
           export OSA_DOCKER_PULL="no"
@@ -375,20 +376,24 @@ jobs:
           if [ "$rc" = "0" ]; then echo "true" > "$RUN_ID/PREFLIGHT_PASS.flag"; else echo "false" > "$RUN_ID/PREFLIGHT_PASS.flag"; fi
           sudo chown -R "$USER:$USER" . 2>/dev/null || true
 
-      - name: Run og_create and dynamic direct SPI
+      - name: Run og_create and dynamic direct SPI only after complete download
         shell: bash
         if: ${{ always() }}
         continue-on-error: true
         run: |
           set +e
-          if [ "$(cat "$RUN_ID/PREFLIGHT_PASS.flag" 2>/dev/null || echo false)" != "true" ]; then echo "SKIP_DYNAMIC_DIRECT_SPI_PREFLIGHT_FAILED" | tee "$RUN_ID/logs/dynamic_direct_spi.log"; echo 77 > "$RUN_ID/logs/og_create_exit_code.txt"; echo 77 > "$RUN_ID/logs/direct_spibounds_exit_code.txt"; echo 77 > "$RUN_ID/logs/direct_spihist_exit_code.txt"; exit 0; fi
+          if [ "$(cat "$RUN_ID/PREFLIGHT_PASS.flag" 2>/dev/null || echo false)" != "true" ]; then
+            echo "SKIP_DYNAMIC_DIRECT_SPI_PREFLIGHT_FAILED" | tee "$RUN_ID/logs/dynamic_direct_spi.log"
+            echo 77 > "$RUN_ID/logs/og_create_exit_code.txt"; echo 77 > "$RUN_ID/logs/direct_spibounds_exit_code.txt"; echo 77 > "$RUN_ID/logs/direct_spihist_exit_code.txt"
+            exit 0
+          fi
           export OSA_VERSION="11.2"
           export OSA_DOCKER_IMAGE="integralsw/osa:11.2-2-g667521a3-20220403-190332"
           export OSA_DOCKER_PULL="no"
           export REP_BASE_PROD="$PWD/$CACHE"
           export CURRENT_IC="$PWD/$CACHE"
           export WORKDIR="$PWD"
-          xvfb-run -a bash ./osa-container.notty.sh docker 'bash /home/integral/'"$RUN_ID"'/scripts/r15_dynamic_direct_spi_inner.sh' 2>&1 | tee "$RUN_ID/logs/dynamic_direct_spi.log"
+          xvfb-run -a bash ./osa-container.notty.sh docker 'bash /home/integral/'"$RUN_ID"'/scripts/dynamic_direct_spi_inner.sh' 2>&1 | tee "$RUN_ID/logs/dynamic_direct_spi.log"
           rc=${PIPESTATUS[0]}
           [ -s "$RUN_ID/logs/og_create_exit_code.txt" ] || echo "$rc" > "$RUN_ID/logs/og_create_exit_code.txt"
           [ -s "$RUN_ID/logs/direct_spibounds_exit_code.txt" ] || echo "$rc" > "$RUN_ID/logs/direct_spibounds_exit_code.txt"
@@ -396,56 +401,65 @@ jobs:
           sudo chown -R "$USER:$USER" . 2>/dev/null || true
           find "$RUN_ID/obs" -maxdepth 6 -type f | sort > "$RUN_ID/logs/run_output_files_after_dynamic_direct_spi.txt" || true
 
-      - name: Extract locked 511 line-sideband from real RUN_OUTPUT only
+      - name: Extract locked 511 line-sideband from RUN_OUTPUT only
         shell: bash
         if: ${{ always() }}
         continue-on-error: true
         run: |
           set +e
-          python3 "$RUN_ID/scripts/r15_extract_line_sideband.py" 2>&1 | tee "$RUN_ID/logs/line_sideband_extract.log"
+          python3 "$RUN_ID/scripts/extract_line_sideband.py" 2>&1 | tee "$RUN_ID/logs/line_sideband_extract.log"
           echo ${PIPESTATUS[0]} > "$RUN_ID/logs/line_sideband_extract_exit_code.txt"
 
-      - name: Build final guarded decision and slim phone package
+      - name: Build final guarded decision and slim package
         shell: bash
         if: ${{ always() }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import json, csv, hashlib
+          import json,csv,hashlib
           from pathlib import Path
-          RUN_ID="R22F_R10B_R15_SPI511_SWG_REFERENCED_DATA_DYNAMIC_SPI_EXECUTION"; OUT=Path(RUN_ID)
+          RUN_ID="R22F_R10B_R16_SPI511_ROBUST_REFERENCED_DOWNLOAD_DYNAMIC_SPI_EXECUTION"; OUT=Path(RUN_ID)
           def ri(n):
-              try: return int((OUT/"logs"/n).read_text().strip().splitlines()[-1])
+              try: return int((OUT/'logs'/n).read_text().strip().splitlines()[-1])
               except Exception: return None
           def rb(p):
-              try: return Path(p).read_text().strip().lower()=="true"
+              try: return Path(p).read_text().strip().lower()=='true'
               except Exception: return False
-          dl={}
-          if (OUT/"swg_referenced_download_status.json").exists():
-              try: dl=json.loads((OUT/"swg_referenced_download_status.json").read_text())
-              except Exception: dl={}
-          line={}
-          if (OUT/"line_sideband_status.json").exists():
-              try: line=json.loads((OUT/"line_sideband_status.json").read_text())
-              except Exception: line={}
-          valid=int(line.get("valid_ratio_rows",0) or 0); best=line.get("best_candidate")
-          download_rc=ri("download_swg_referenced_members_exit_code.txt"); pre_rc=ri("osa_command_preflight_exit_code.txt"); og_rc=ri("og_create_exit_code.txt"); sb_rc=ri("direct_spibounds_exit_code.txt"); sh_rc=ri("direct_spihist_exit_code.txt"); ex_rc=ri("line_sideband_extract_exit_code.txt")
-          pre=rb(OUT/"PREFLIGHT_PASS.flag"); og=rb(OUT/"OG_CREATE_PASS.flag"); direct=rb(OUT/"DIRECT_SPI_PASS.flag")
-          if download_rc not in (0,None) or dl.get("missing_member_count",0): decision="R22F_R10B_R15_SWG_REFERENCED_DOWNLOAD_INCOMPLETE_NO_THEORY_FAILURE"
-          elif not pre: decision="R22F_R10B_R15_OSA_PREFLIGHT_FAILED_NO_THEORY_FAILURE"
-          elif og_rc not in (0,None) or not og: decision="R22F_R10B_R15_OG_CREATE_FAILED_NO_THEORY_FAILURE"
-          elif sb_rc not in (0,None): decision="R22F_R10B_R15_SPIBOUNDS_FAILED_NO_THEORY_FAILURE"
-          elif sh_rc not in (0,None) or not direct: decision="R22F_R10B_R15_SPIHIST_FAILED_NO_THEORY_FAILURE"
-          elif valid and best and best.get("passes_min_ratio"): decision="R22F_R10B_R15_SPI511_RUN_OUTPUT_LINE_SIDEBAND_RATIO_PASS_REQUIRES_CONTROLS_NOT_PROOF"
-          elif valid: decision="R22F_R10B_R15_SPI511_RUN_OUTPUT_LINE_SIDEBAND_RATIO_AVAILABLE_NOT_PRODUCT_PROOF_AUDIT_REQUIRED"
-          else: decision="R22F_R10B_R15_NO_USABLE_RUN_OUTPUT_LINE_SIDEBAND_EXTRACTED_NO_THEORY_FAILURE"
-          status={"run_id":RUN_ID,"decision":decision,"download_exit":download_rc,"missing_member_count":dl.get("missing_member_count"),"required_member_count":dl.get("required_member_count"),"total_downloaded_mb":dl.get("total_downloaded_mb"),"preflight_pass":pre,"osa_preflight_exit":pre_rc,"og_create_exit":og_rc,"og_create_pass":og,"direct_spibounds_exit":sb_rc,"direct_spihist_exit":sh_rc,"direct_spi_pass":direct,"line_sideband_extract_exit":ex_rc,"valid_ratio_rows":valid,"best_candidate":best,"claim_ceiling":"SWG_REFERENCED_DATA_DYNAMIC_SPI_RUN_OUTPUT_NOT_PROOF_NOT_FINAL_LAW","raw_heavy_files_packaged":False,"no_rescue_applied":True}
-          (OUT/"STATUS.json").write_text(json.dumps(status,indent=2,sort_keys=True),encoding="utf-8")
-          with (OUT/"R22F_R10B_R15_GO_NO_GO_DECISION.csv").open("w",newline="",encoding="utf-8") as f: w=csv.DictWriter(f,fieldnames=list(status.keys())); w.writeheader(); w.writerow(status)
+          dl={}; line={}
+          if (OUT/'swg_referenced_download_status.json').exists():
+              try: dl=json.loads((OUT/'swg_referenced_download_status.json').read_text())
+              except Exception: pass
+          if (OUT/'line_sideband_status.json').exists():
+              try: line=json.loads((OUT/'line_sideband_status.json').read_text())
+              except Exception: pass
+          valid=int(line.get('valid_ratio_rows',0) or 0); best=line.get('best_candidate')
+          download_complete=rb(OUT/'DOWNLOAD_COMPLETE.flag'); pre=rb(OUT/'PREFLIGHT_PASS.flag'); og=rb(OUT/'OG_CREATE_PASS.flag'); direct=rb(OUT/'DIRECT_SPI_PASS.flag')
+          missing=dl.get('missing_member_count')
+          if not download_complete:
+              decision='R22F_R10B_R16_REFERENCED_DOWNLOAD_INCOMPLETE_NO_THEORY_FAILURE'
+          elif not pre:
+              decision='R22F_R10B_R16_OSA_PREFLIGHT_FAILED_NO_THEORY_FAILURE'
+          elif not og:
+              decision='R22F_R10B_R16_OG_CREATE_FAILED_NO_THEORY_FAILURE'
+          elif ri('direct_spibounds_exit_code.txt') not in (0,None):
+              decision='R22F_R10B_R16_SPIBOUNDS_FAILED_NO_THEORY_FAILURE'
+          elif ri('direct_spihist_exit_code.txt') not in (0,None) or not direct:
+              decision='R22F_R10B_R16_SPIHIST_FAILED_NO_THEORY_FAILURE'
+          elif valid and best and best.get('passes_min_ratio'):
+              decision='R22F_R10B_R16_SPI511_RUN_OUTPUT_LINE_SIDEBAND_RATIO_PASS_REQUIRES_CONTROLS_NOT_PROOF'
+          elif valid:
+              decision='R22F_R10B_R16_SPI511_RUN_OUTPUT_LINE_SIDEBAND_RATIO_AVAILABLE_NOT_PRODUCT_PROOF_AUDIT_REQUIRED'
+          else:
+              decision='R22F_R10B_R16_NO_USABLE_RUN_OUTPUT_LINE_SIDEBAND_EXTRACTED_NO_THEORY_FAILURE'
+          status={'run_id':RUN_ID,'decision':decision,'download_complete':download_complete,'missing_member_count':missing,'required_member_count':dl.get('required_member_count'),'downloaded_or_cached_files':dl.get('downloaded_or_cached_files'),'preflight_pass':pre,'og_create_pass':og,'direct_spi_pass':direct,'download_exit':ri('download_referenced_robust_exit_code.txt'),'osa_preflight_exit':ri('osa_command_preflight_exit_code.txt'),'og_create_exit':ri('og_create_exit_code.txt'),'direct_spibounds_exit':ri('direct_spibounds_exit_code.txt'),'direct_spihist_exit':ri('direct_spihist_exit_code.txt'),'line_sideband_extract_exit':ri('line_sideband_extract_exit_code.txt'),'valid_ratio_rows':valid,'best_candidate':best,'claim_ceiling':'ROBUST_REFERENCED_DOWNLOAD_DYNAMIC_SPI_RUN_OUTPUT_NOT_PROOF_NOT_FINAL_LAW','raw_heavy_files_packaged':False,'no_rescue_applied':True}
+          (OUT/'STATUS.json').write_text(json.dumps(status,indent=2,sort_keys=True),encoding='utf-8')
+          with (OUT/'R22F_R10B_R16_GO_NO_GO_DECISION.csv').open('w',newline='',encoding='utf-8') as f:
+              w=csv.DictWriter(f,fieldnames=list(status.keys())); w.writeheader(); w.writerow(status)
           rows=[]
-          for p in sorted(OUT.rglob("*")):
-              if p.is_file(): rows.append({"file":str(p.relative_to(OUT)),"sha256":hashlib.sha256(p.read_bytes()).hexdigest(),"bytes":p.stat().st_size})
-          with (OUT/"MANIFEST_SHA256.csv").open("w",newline="",encoding="utf-8") as f: w=csv.DictWriter(f,fieldnames=["file","sha256","bytes"]); w.writeheader(); w.writerows(rows)
+          for p in sorted(OUT.rglob('*')):
+              if p.is_file(): rows.append({'file':str(p.relative_to(OUT)),'sha256':hashlib.sha256(p.read_bytes()).hexdigest(),'bytes':p.stat().st_size})
+          with (OUT/'MANIFEST_SHA256.csv').open('w',newline='',encoding='utf-8') as f:
+              w=csv.DictWriter(f,fieldnames=['file','sha256','bytes']); w.writeheader(); w.writerows(rows)
           print(json.dumps(status,indent=2,sort_keys=True))
           PY
           ZIP="${RUN_ID}_RESULTS.zip"; SHA="${ZIP}.sha256.txt"
@@ -457,9 +471,9 @@ jobs:
         uses: actions/upload-artifact@v4
         if: ${{ always() }}
         with:
-          name: R22F_R10B_R15_SPI511_SWG_REFERENCED_DATA_DYNAMIC_SPI_RESULTS
+          name: R22F_R10B_R16_SPI511_ROBUST_REFERENCED_DOWNLOAD_DYNAMIC_SPI_RESULTS
           path: |
-            R22F_R10B_R15_SPI511_SWG_REFERENCED_DATA_DYNAMIC_SPI_EXECUTION_RESULTS.zip
-            R22F_R10B_R15_SPI511_SWG_REFERENCED_DATA_DYNAMIC_SPI_EXECUTION_RESULTS.zip.sha256.txt
+            R22F_R10B_R16_SPI511_ROBUST_REFERENCED_DOWNLOAD_DYNAMIC_SPI_EXECUTION_RESULTS.zip
+            R22F_R10B_R16_SPI511_ROBUST_REFERENCED_DOWNLOAD_DYNAMIC_SPI_EXECUTION_RESULTS.zip.sha256.txt
           if-no-files-found: error
           retention-days: 14

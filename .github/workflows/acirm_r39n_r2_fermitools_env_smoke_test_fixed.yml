@@ -1,0 +1,258 @@
+name: ACIRM R39N R2 Fermitools Env Smoke Test Fixed
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  RUN_ID: ACIRM_R39N_R2_GITHUB_ACTIONS_FERMITOOLS_ENV_SMOKE_TEST_FIXED_NO_LATDATA_NO_TS
+  CLAIM_CEILING: environment smoke test only; no LAT data; no likelihood; no TS; not proof
+
+jobs:
+  r39n-r2-fermitools-env-smoke-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: bash -l {0}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Prepare output folders
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUN_ID/results" "$RUN_ID/logs"
+          echo "$CLAIM_CEILING" > "$RUN_ID/results/CLAIM_CEILING.txt"
+          echo "R39N_R2 fixed workflow: no LAT data, no likelihood, no TS, not proof." > "$RUN_ID/results/README.txt"
+
+      - name: Cache conda packages
+        uses: actions/cache@v4
+        with:
+          path: ~/conda_pkgs_dir
+          key: ${{ runner.os }}-r39n-r2-conda-pkgs-${{ hashFiles('environment-r39n-r2.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-r39n-r2-conda-pkgs-
+
+      - name: Set up Miniforge and mamba
+        uses: conda-incubator/setup-miniconda@v3
+        with:
+          miniforge-version: latest
+          mamba-version: "*"
+          channels: conda-forge,fermi
+          channel-priority: strict
+          show-channel-urls: true
+          use-only-tar-bz2: true
+          auto-update-conda: true
+          auto-activate-base: true
+
+      - name: Record base conda state
+        run: |
+          set +e
+          conda info > "$RUN_ID/logs/conda_info.txt" 2>&1
+          conda config --show > "$RUN_ID/logs/conda_config.txt" 2>&1
+          conda list > "$RUN_ID/logs/base_conda_list.txt" 2>&1
+          mamba --version > "$RUN_ID/logs/mamba_version.txt" 2>&1
+          conda --version > "$RUN_ID/logs/conda_version.txt" 2>&1
+          true
+
+      - name: Create Fermitools/Fermipy environment with controlled fallbacks
+        id: create_env
+        run: |
+          set +e
+          ENV_NAME="acirm-fermi-r39n-r2"
+          echo "ENV_NAME=$ENV_NAME" | tee "$RUN_ID/logs/env_name.txt"
+          echo "START_ENV_CREATE_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)" | tee "$RUN_ID/logs/env_create_status.txt"
+
+          echo "Attempt 1: mamba env create from environment-r39n-r2.yml" | tee -a "$RUN_ID/logs/env_create_status.txt"
+          mamba env create -f environment-r39n-r2.yml > "$RUN_ID/logs/attempt1_env_create.log" 2>&1
+          RC=$?
+          echo "ATTEMPT1_RC=$RC" | tee -a "$RUN_ID/logs/env_create_status.txt"
+
+          if [ "$RC" != "0" ]; then
+            echo "Attempt 2: explicit python=3.10 fermitools fermipy" | tee -a "$RUN_ID/logs/env_create_status.txt"
+            mamba create -y -n "$ENV_NAME" -c conda-forge -c fermi python=3.10 fermitools fermipy numpy astropy scipy pandas matplotlib > "$RUN_ID/logs/attempt2_explicit_py310.log" 2>&1
+            RC=$?
+            echo "ATTEMPT2_RC=$RC" | tee -a "$RUN_ID/logs/env_create_status.txt"
+          fi
+
+          if [ "$RC" != "0" ]; then
+            echo "Attempt 3: explicit python=3.9 fermitools fermipy" | tee -a "$RUN_ID/logs/env_create_status.txt"
+            mamba create -y -n "$ENV_NAME" -c conda-forge -c fermi python=3.9 fermitools fermipy numpy astropy scipy pandas matplotlib > "$RUN_ID/logs/attempt3_explicit_py39.log" 2>&1
+            RC=$?
+            echo "ATTEMPT3_RC=$RC" | tee -a "$RUN_ID/logs/env_create_status.txt"
+          fi
+
+          if [ "$RC" != "0" ]; then
+            echo "Attempt 4: fermitools only, fermipy may remain missing" | tee -a "$RUN_ID/logs/env_create_status.txt"
+            mamba create -y -n "$ENV_NAME" -c conda-forge -c fermi python=3.10 fermitools numpy astropy scipy pandas matplotlib > "$RUN_ID/logs/attempt4_fermitools_only.log" 2>&1
+            RC=$?
+            echo "ATTEMPT4_RC=$RC" | tee -a "$RUN_ID/logs/env_create_status.txt"
+          fi
+
+          echo "FINAL_ENV_CREATE_RC=$RC" | tee -a "$RUN_ID/logs/env_create_status.txt"
+          echo "END_ENV_CREATE_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)" | tee -a "$RUN_ID/logs/env_create_status.txt"
+          echo "env_create_rc=$RC" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Check commands and Python imports
+        run: |
+          set +e
+          ENV_NAME="acirm-fermi-r39n-r2"
+          mkdir -p "$RUN_ID/results"
+
+          echo "command,found,path,core" > "$RUN_ID/results/R39N_R2_COMMANDS_CHECK.csv"
+          for CMD in gtselect gtmktime gtbin gtlike gtmodel gtexpcube2 gtltcube gtpsf python python3; do
+            CORE=false
+            case "$CMD" in
+              gtselect|gtmktime|gtbin|gtlike|gtmodel|gtexpcube2|gtltcube|gtpsf) CORE=true ;;
+            esac
+            PATH_OUT=$(conda run -n "$ENV_NAME" bash -lc "command -v $CMD" 2>/dev/null)
+            if [ -n "$PATH_OUT" ]; then FOUND=true; else FOUND=false; fi
+            PATH_CLEAN=$(echo "$PATH_OUT" | tr ',' ';' | tr '\n' ' ' | head -c 500)
+            echo "$CMD,$FOUND,$PATH_CLEAN,$CORE" >> "$RUN_ID/results/R39N_R2_COMMANDS_CHECK.csv"
+          done
+
+          echo "module,import_ok,error,core" > "$RUN_ID/results/R39N_R2_MODULES_CHECK.csv"
+          for MOD in numpy astropy scipy pandas matplotlib fermipy; do
+            CORE=false
+            case "$MOD" in
+              numpy|astropy) CORE=true ;;
+            esac
+            ERR=$(conda run -n "$ENV_NAME" python -c "import $MOD; print('OK')" 2>&1 >/tmp/r39n_r2_mod_stdout.txt)
+            RC=$?
+            if [ "$RC" = "0" ]; then OK=true; ERR=""; else OK=false; fi
+            ERR_CLEAN=$(echo "$ERR" | tr '\n' ' ' | tr ',' ';' | head -c 700)
+            echo "$MOD,$OK,$ERR_CLEAN,$CORE" >> "$RUN_ID/results/R39N_R2_MODULES_CHECK.csv"
+          done
+
+          conda run -n "$ENV_NAME" python --version > "$RUN_ID/logs/env_python_version.txt" 2>&1
+          conda run -n "$ENV_NAME" conda list > "$RUN_ID/logs/env_conda_list.txt" 2>&1
+          for CMD in gtselect gtmktime gtlike; do
+            conda run -n "$ENV_NAME" bash -lc "$CMD --version" > "$RUN_ID/logs/${CMD}_version.txt" 2>&1
+          done
+          true
+
+      - name: Build decision summary and package
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import csv, json, hashlib, zipfile, os
+          from datetime import datetime, timezone
+
+          run_id = os.environ["RUN_ID"]
+          root = Path(run_id)
+          results = root / "results"
+          logs = root / "logs"
+
+          def read_text(p):
+              try:
+                  return Path(p).read_text(encoding="utf-8", errors="ignore")
+              except Exception:
+                  return ""
+
+          def sha256_file(p):
+              h = hashlib.sha256()
+              with open(p, "rb") as f:
+                  for b in iter(lambda: f.read(1024 * 1024), b""):
+                      h.update(b)
+              return h.hexdigest()
+
+          env_status = read_text(logs / "env_create_status.txt")
+          env_create_rc = None
+          for line in env_status.splitlines():
+              if line.startswith("FINAL_ENV_CREATE_RC="):
+                  try:
+                      env_create_rc = int(line.split("=", 1)[1])
+                  except Exception:
+                      env_create_rc = None
+
+          command_file = results / "R39N_R2_COMMANDS_CHECK.csv"
+          module_file = results / "R39N_R2_MODULES_CHECK.csv"
+
+          command_rows = []
+          module_rows = []
+          if command_file.exists():
+              with open(command_file, newline="", encoding="utf-8") as f:
+                  command_rows = list(csv.DictReader(f))
+          if module_file.exists():
+              with open(module_file, newline="", encoding="utf-8") as f:
+                  module_rows = list(csv.DictReader(f))
+
+          core_cmds = [r for r in command_rows if str(r.get("core", "")).lower() == "true"]
+          core_commands_found = sum(1 for r in core_cmds if str(r.get("found", "")).lower() == "true")
+          core_commands_total = len(core_cmds)
+          fermipy_import_ok = any(r.get("module") == "fermipy" and str(r.get("import_ok", "")).lower() == "true" for r in module_rows)
+          core_python_modules_ok = all(str(r.get("import_ok", "")).lower() == "true" for r in module_rows if str(r.get("core", "")).lower() == "true") if module_rows else False
+
+          if env_create_rc == 0 and core_commands_found == core_commands_total and fermipy_import_ok and core_python_modules_ok:
+              status = "R39N_R2_GITHUB_ACTIONS_ENV_SMOKE_TEST_PASS_READY_FOR_R39O_NO_LATDATA_NO_TS_NOT_PROOF"
+          elif env_create_rc == 0 and core_commands_found == core_commands_total and core_python_modules_ok and not fermipy_import_ok:
+              status = "R39N_R2_FERMITOOLS_PASS_FERMIPY_MISSING_PARTIAL_ENV_NOT_PHYSICAL_NULL"
+          elif env_create_rc == 0 and core_commands_found > 0:
+              status = "R39N_R2_PARTIAL_FERMI_ENV_NEEDS_MANUAL_REVIEW_NOT_PHYSICAL_NULL"
+          else:
+              status = "R39N_R2_GITHUB_ENV_CREATE_OR_SOLVE_FAILED_TECHNICAL_BLOCK_NOT_PHYSICAL_NULL"
+
+          summary = {
+              "run_id": run_id,
+              "created_utc": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+              "status": status,
+              "claim_ceiling": os.environ.get("CLAIM_CEILING", ""),
+              "env_create_rc": env_create_rc,
+              "core_commands_found": core_commands_found,
+              "core_commands_total": core_commands_total,
+              "fermipy_import_ok": fermipy_import_ok,
+              "core_python_modules_ok": core_python_modules_ok,
+              "command_rows": command_rows,
+              "module_rows": module_rows,
+              "physical_interpretation": "technical environment smoke test only; no LAT data; no likelihood; no TS; not a physical null and not evidence against 3C279 +4/+8",
+          }
+          (results / "R39N_R2_DECISION_SUMMARY.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+          (results / "README_AR.md").write_text(
+              "# " + run_id + "\n\n"
+              "STATUS: `" + status + "`\n\n"
+              "هذه حزمة فحص بيئة فقط: لا LAT data، لا likelihood، لا TS، لا photon selection، ولا proof.\n",
+              encoding="utf-8",
+          )
+
+          manifest = results / "R39N_R2_MANIFEST_SHA256.csv"
+          with open(manifest, "w", newline="", encoding="utf-8") as f:
+              w = csv.DictWriter(f, fieldnames=["filename", "size_bytes", "sha256"])
+              w.writeheader()
+              for p in sorted(results.iterdir()):
+                  if p.name == manifest.name or p.is_dir():
+                      continue
+                  w.writerow({"filename": p.name, "size_bytes": p.stat().st_size, "sha256": sha256_file(p)})
+
+          zip_path = Path(f"{run_id}_PACKAGE.zip")
+          sha_path = Path(f"{run_id}_PACKAGE.zip.sha256.txt")
+          with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
+              for folder in [results, logs]:
+                  for p in sorted(folder.rglob("*")):
+                      if p.is_file():
+                          z.write(p, arcname=str(Path(run_id) / p.relative_to(root)))
+          zsha = sha256_file(zip_path)
+          sha_path.write_text(f"{zsha}  {zip_path.name}\n", encoding="utf-8")
+
+          print("STATUS:", status)
+          print("ZIP:", zip_path)
+          print("SHA256:", zsha)
+          print("CORE_COMMANDS_FOUND:", f"{core_commands_found}/{core_commands_total}")
+          print("FERMIPY_IMPORT_OK:", fermipy_import_ok)
+          print("CORE_PYTHON_MODULES_OK:", core_python_modules_ok)
+          PY
+
+      - name: Upload small R39N R2 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ACIRM_R39N_R2_GITHUB_ACTIONS_FERMITOOLS_ENV_SMOKE_TEST_FIXED_NO_LATDATA_NO_TS_RESULTS
+          path: |
+            ACIRM_R39N_R2_GITHUB_ACTIONS_FERMITOOLS_ENV_SMOKE_TEST_FIXED_NO_LATDATA_NO_TS_PACKAGE.zip
+            ACIRM_R39N_R2_GITHUB_ACTIONS_FERMITOOLS_ENV_SMOKE_TEST_FIXED_NO_LATDATA_NO_TS_PACKAGE.zip.sha256.txt
+          if-no-files-found: error
+          retention-days: 14

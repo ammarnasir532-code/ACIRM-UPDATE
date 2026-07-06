@@ -1,0 +1,13 @@
+name: acirm-fermi-r39n
+channels:
+  - conda-forge
+  - fermi
+dependencies:
+  - python=3.10
+  - fermitools
+  - fermipy
+  - numpy
+  - astropy
+  - scipy
+  - pandas
+  - matplotlib

@@ -1,0 +1,145 @@
+name: ACIRM R39Q 3C279 Minimal Safe Data Availability Plan No Download
+
+on:
+  workflow_dispatch:
+
+jobs:
+  acirm-r39q-data-availability-plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Build R39Q no-download data availability plan
+        shell: bash
+        run: |
+          set -u
+          RUN_ID="ACIRM_R39Q_3C279_MINIMAL_SAFE_DATA_AVAILABILITY_PLAN_NO_DOWNLOAD_NO_TS"
+          mkdir -p "$RUN_ID/results" "$RUN_ID/logs"
+          echo "START_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$RUN_ID/logs/run_status.txt"
+
+          cat > "$RUN_ID/results/R39Q_DECISION_SUMMARY.json" <<'EOF'
+          {
+            "run_id": "ACIRM_R39Q_3C279_MINIMAL_SAFE_DATA_AVAILABILITY_PLAN_NO_DOWNLOAD_NO_TS",
+            "status": "R39Q_3C279_MINIMAL_SAFE_DATA_AVAILABILITY_PLAN_PASS_READY_FOR_R40A_STRICT_RERUN_PREP_NO_DOWNLOAD_NO_TS_NOT_PROOF",
+            "claim_ceiling": "data-availability planning only; no LAT data download; no photon selection; no likelihood; no TS; not proof",
+            "target_source": "3C279",
+            "locked_lags_weeks": [4, 8],
+            "locked_reference_stage": "R35H_R2",
+            "next_step_if_pass": "R40A strict 3C279 rerun prep with explicit data-query specification",
+            "physical_interpretation": "planning scaffold only; not a physical test and not a physical null"
+          }
+          EOF
+
+          cat > "$RUN_ID/results/R39Q_REQUIRED_INPUTS.csv" <<'EOF'
+          input_class,required,status,note
+          target_source,true,LOCKED,3C279 only
+          locked_lags,true,LOCKED,+4 and +8 weeks only
+          event_file_or_query_spec,true,PLANNED_NOT_DOWNLOADED,no LAT event data downloaded in R39Q
+          spacecraft_file_or_query_spec,true,PLANNED_NOT_DOWNLOADED,no spacecraft data downloaded in R39Q
+          catalog_model_xml,true,PLANNED_NOT_GENERATED,no XML model generated in R39Q
+          GTI_filter,true,PLANNED_NOT_EXECUTED,no gtmktime executed in R39Q
+          IRFS,true,PLANNED_NOT_EXECUTED,no exposure or likelihood executed in R39Q
+          control_set,true,LOCKED_BY_PRIOR_LEDGER,no post-result control dropping
+          claim_ceiling,true,LOCKED,not proof not discovery not material production
+          EOF
+
+          cat > "$RUN_ID/results/R39Q_GATES.csv" <<'EOF'
+          gate,status,reason
+          G1_SOURCE_LOCK,PASS,target source remains 3C279
+          G2_LAG_LOCK,PASS,only +4 and +8 are allowed
+          G3_NO_DOWNLOAD,PASS,no LAT event or spacecraft data downloaded
+          G4_NO_FERMITOOLS_EXECUTION,PASS,no gtselect gtmktime gtlike or likelihood command executed
+          G5_NO_TS_NEW,PASS,no new TS computed
+          G6_NO_RESCUE_BRANCHES,PASS,+1 and 3C273 +12 remain excluded
+          G7_READY_FOR_R40A_PREP,PASS,next step is strict rerun-prep only
+          EOF
+
+          cat > "$RUN_ID/results/R39Q_LOCKED_3C279_REFERENCE.json" <<'EOF'
+          {
+            "target_source": "3C279",
+            "locked_lags_weeks": [4, 8],
+            "reference_stage": "R35H_R2",
+            "plus4_ts": 2427.718553,
+            "plus8_ts": 924.805371,
+            "target_min_ts": 924.805371,
+            "target_sum_ts": 3352.523924,
+            "best_control_min_ts": 201.385473,
+            "best_control_sum_ts": 841.990828,
+            "target_min_margin": 723.419898,
+            "target_sum_margin": 2510.533096,
+            "claim_ceiling": "not proof; not discovery; not material production; not universal +4/+8 timing"
+          }
+          EOF
+
+          cat > "$RUN_ID/results/R40A_NEXT_ACTION_PLAN_AR.md" <<'EOF'
+          # R40A next action
+
+          R40A should prepare an explicit strict 3C279 rerun specification.
+
+          It must still avoid new TS until all data-query fields, ROI, time windows, IRFs, catalog model, controls, and claim ceiling are locked.
+
+          Forbidden:
+          - no +1 rescue
+          - no 3C273 +12 rescue
+          - no lag retuning
+          - no source retuning
+          - no control dropping after results
+          - no proof language
+          EOF
+
+          cat > "$RUN_ID/results/README_AR.md" <<'EOF'
+          # R39Q
+
+          STATUS: `R39Q_3C279_MINIMAL_SAFE_DATA_AVAILABILITY_PLAN_PASS_READY_FOR_R40A_STRICT_RERUN_PREP_NO_DOWNLOAD_NO_TS_NOT_PROOF`
+
+          هذه حزمة تخطيط توفر بيانات فقط.
+
+          لا LAT data download، لا photon selection، لا likelihood، لا TS، ولا proof.
+          EOF
+
+          cat > "$RUN_ID/results/CLAIM_CEILING.txt" <<'EOF'
+          data-availability planning only; no LAT data download; no photon selection; no likelihood; no TS; not proof; not discovery; not material production
+          EOF
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, csv
+          run_id = "ACIRM_R39Q_3C279_MINIMAL_SAFE_DATA_AVAILABILITY_PLAN_NO_DOWNLOAD_NO_TS"
+          results = Path(run_id)/"results"
+          manifest = results/"R39Q_MANIFEST_SHA256.csv"
+          def sha256(p):
+              h=hashlib.sha256()
+              with open(p,'rb') as f:
+                  for b in iter(lambda:f.read(1024*1024), b''):
+                      h.update(b)
+              return h.hexdigest()
+          with open(manifest, 'w', newline='', encoding='utf-8') as f:
+              w=csv.DictWriter(f, fieldnames=['filename','size_bytes','sha256'])
+              w.writeheader()
+              for p in sorted(results.iterdir()):
+                  if p.is_file() and p.name != manifest.name:
+                      w.writerow({'filename': p.name, 'size_bytes': p.stat().st_size, 'sha256': sha256(p)})
+          PY
+
+          echo "END_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$RUN_ID/logs/run_status.txt"
+
+          ZIP_NAME="${RUN_ID}_RESULTS_PACKAGE.zip"
+          zip -r "$ZIP_NAME" "$RUN_ID/results" "$RUN_ID/logs" >/dev/null
+          sha256sum "$ZIP_NAME" > "$ZIP_NAME.sha256.txt"
+
+          echo "STATUS: R39Q_3C279_MINIMAL_SAFE_DATA_AVAILABILITY_PLAN_PASS_READY_FOR_R40A_STRICT_RERUN_PREP_NO_DOWNLOAD_NO_TS_NOT_PROOF"
+          echo "TARGET_SOURCE: 3C279"
+          echo "LOCKED_LAGS: +4,+8"
+          echo "NO_LATDATA_DOWNLOAD: true"
+          echo "NO_TS: true"
+          echo "ZIP: $ZIP_NAME"
+          echo "SHA256: $(cut -d' ' -f1 "$ZIP_NAME.sha256.txt")"
+
+      - name: Upload R39Q artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ACIRM_R39Q_3C279_MINIMAL_SAFE_DATA_AVAILABILITY_PLAN_NO_DOWNLOAD_NO_TS_RESULTS
+          path: |
+            ACIRM_R39Q_3C279_MINIMAL_SAFE_DATA_AVAILABILITY_PLAN_NO_DOWNLOAD_NO_TS_RESULTS_PACKAGE.zip
+            ACIRM_R39Q_3C279_MINIMAL_SAFE_DATA_AVAILABILITY_PLAN_NO_DOWNLOAD_NO_TS_RESULTS_PACKAGE.zip.sha256.txt
+          if-no-files-found: error

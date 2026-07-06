@@ -1,0 +1,143 @@
+name: ACIRM R40L Real Fermipy Likelihood TS Pilot 3C279
+
+on:
+  workflow_dispatch:
+
+jobs:
+  r40l-real-likelihood:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Real Fermipy likelihood TS pilot for 3C279 +4 +8
+        shell: bash
+        run: |
+          set +e
+          R=ACIRM_R40L_REAL_FERMIPY_LIKELIHOOD_TS_PILOT_3C279
+          mkdir -p $R/data $R/logs $R/results $R/work
+          echo "TARGET_SOURCE=3C279" > $R/results/summary.txt
+          echo "TARGET_4FGL=4FGL J1256.1-0547" >> $R/results/summary.txt
+          echo "LOCKED_LAGS=+4,+8" >> $R/results/summary.txt
+          echo "REAL_LAT_DATA=true" >> $R/results/summary.txt
+          echo "LIKELIHOOD_ATTEMPTED=true" >> $R/results/summary.txt
+          echo "NOT_PROOF=true" >> $R/results/summary.txt
+
+          MM=$HOME/mm/bin/micromamba
+          ENV=$HOME/fermi_env
+          mkdir -p $HOME/mm/bin
+          curl -Ls https://micro.mamba.pm/api/micromamba/linux-64/latest | tar -xvj -C $HOME/mm bin/micromamba > $R/logs/micromamba.log 2>&1
+          $MM create -y -p $ENV -c conda-forge -c fermi python=3.11 fermitools fermipy 'regions<0.12' astropy numpy pyyaml > $R/logs/env.log 2>&1
+          ENV_RC=$?
+
+          curl -L --fail --retry 3 -o $R/data/p4.fits https://heasarc.gsfc.nasa.gov/FTP/fermi/data/lat/weekly/photon/lat_photon_weekly_w290_p305_v001.fits > $R/logs/dl_p4.log 2>&1; D1=$?
+          curl -L --fail --retry 3 -o $R/data/s4.fits https://heasarc.gsfc.nasa.gov/FTP/fermi/data/lat/weekly/spacecraft/lat_spacecraft_weekly_w290_p310_v001.fits > $R/logs/dl_s4.log 2>&1; D2=$?
+          curl -L --fail --retry 3 -o $R/data/p8.fits https://heasarc.gsfc.nasa.gov/FTP/fermi/data/lat/weekly/photon/lat_photon_weekly_w294_p305_v001.fits > $R/logs/dl_p8.log 2>&1; D3=$?
+          curl -L --fail --retry 3 -o $R/data/s8.fits https://heasarc.gsfc.nasa.gov/FTP/fermi/data/lat/weekly/spacecraft/lat_spacecraft_weekly_w294_p310_v001.fits > $R/logs/dl_s8.log 2>&1; D4=$?
+          curl -L --fail --retry 3 -o $R/data/gll_psc_v35.fit https://fermi.gsfc.nasa.gov/ssc/data/access/lat/14yr_catalog/gll_psc_v35.fit > $R/logs/dl_catalog.log 2>&1; D5=$?
+          curl -L --fail --retry 3 -o $R/data/gll_iem_v07.fits https://fermi.gsfc.nasa.gov/ssc/data/access/lat/BackgroundModels/gll_iem_v07.fits > $R/logs/dl_galdiff.log 2>&1; D6=$?
+          curl -L --fail --retry 3 -o $R/data/iso_P8R3_SOURCE_V3_v1.txt https://fermi.gsfc.nasa.gov/ssc/data/access/lat/BackgroundModels/iso_P8R3_SOURCE_V3_v1.txt > $R/logs/dl_isodiff.log 2>&1; D7=$?
+
+          SIZE_OK=0
+          [ -f $R/data/p4.fits ] && [ "$(stat -c%s $R/data/p4.fits)" = "318951360" ] && SIZE_OK=$((SIZE_OK+1))
+          [ -f $R/data/s4.fits ] && [ "$(stat -c%s $R/data/s4.fits)" = "2862720" ] && SIZE_OK=$((SIZE_OK+1))
+          [ -f $R/data/p8.fits ] && [ "$(stat -c%s $R/data/p8.fits)" = "360636480" ] && SIZE_OK=$((SIZE_OK+1))
+          [ -f $R/data/s8.fits ] && [ "$(stat -c%s $R/data/s8.fits)" = "2822400" ] && SIZE_OK=$((SIZE_OK+1))
+          [ -s $R/data/gll_psc_v35.fit ] && SIZE_OK=$((SIZE_OK+1))
+          [ -s $R/data/gll_iem_v07.fits ] && SIZE_OK=$((SIZE_OK+1))
+          [ -s $R/data/iso_P8R3_SOURCE_V3_v1.txt ] && SIZE_OK=$((SIZE_OK+1))
+          TOTAL_BYTES=$(du -cb $R/data/* 2>/dev/null | tail -1 | cut -f1)
+
+          export PFILES=$PWD/$R/pfiles:$ENV/share/fermitools/syspfiles:$ENV/syspfiles
+          mkdir -p $PWD/$R/pfiles
+          cat > $R/work/run_like.py <<'PY'
+          import json, os, traceback
+          from pathlib import Path
+          import yaml
+          from astropy.io import fits
+          R = Path('ACIRM_R40L_REAL_FERMIPY_LIKELIHOOD_TS_PILOT_3C279')
+          target = '4FGL J1256.1-0547'
+          rows=[]
+          def make_cfg(tag, evfile, scfile):
+              outdir = str(R/'work'/('fermipy_'+tag))
+              cfg = {
+                'data': {'evfile': str(evfile), 'scfile': str(scfile)},
+                'binning': {'roiwidth': 12.0, 'binsz': 0.2, 'binsperdec': 4, 'coordsys': 'CEL'},
+                'selection': {'ra': 194.047, 'dec': -5.789, 'emin': 100, 'emax': 300000, 'zmax': 90, 'evclass': 128, 'evtype': 3, 'target': target},
+                'gtlike': {'irfs': 'P8R3_SOURCE_V3', 'edisp': False},
+                'model': {'src_roiwidth': 15.0, 'galdiff': str(R/'data'/'gll_iem_v07.fits'), 'isodiff': str(R/'data'/'iso_P8R3_SOURCE_V3_v1.txt'), 'catalogs': [str(R/'data'/'gll_psc_v35.fit')]},
+                'fileio': {'outdir': outdir, 'logfile': str(R/'logs'/(tag+'_fermipy.log')), 'usescratch': False},
+                'optimizer': {'optimizer': 'MINUIT', 'tol': 1e-3}
+              }
+              p=R/'work'/(tag+'_config.yaml')
+              p.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding='utf-8')
+              return p
+          for tag, ev, sc in [('P4', R/'data'/'p4.fits', R/'data'/'s4.fits'), ('P8', R/'data'/'p8.fits', R/'data'/'s8.fits')]:
+              rec={'tag':tag, 'setup_ok':False, 'fit_ok':False, 'ts':'NA', 'npred':'NA', 'flux':'NA', 'error':''}
+              try:
+                  from fermipy.gtanalysis import GTAnalysis
+                  cfg = make_cfg(tag, ev, sc)
+                  gta = GTAnalysis(str(cfg), logging={'verbosity': 3})
+                  gta.setup()
+                  rec['setup_ok']=True
+                  gta.optimize()
+                  gta.free_source(target, pars='norm')
+                  fitres = gta.fit()
+                  rec['fit_ok']=True
+                  src = gta.roi[target]
+                  for key in ['ts','npred','flux']:
+                      try: rec[key] = src.get(key, 'NA')
+                      except Exception: rec[key] = 'NA'
+                  gta.write_roi(tag+'_roi')
+              except Exception as e:
+                  rec['error']=repr(e)+'\n'+traceback.format_exc()[-4000:]
+              rows.append(rec)
+          (R/'results'/'R40L_LIKELIHOOD_RESULTS.json').write_text(json.dumps(rows, indent=2), encoding='utf-8')
+          with open(R/'results'/'R40L_LIKELIHOOD_RESULTS.csv','w',encoding='utf-8') as f:
+              f.write('tag,setup_ok,fit_ok,ts,npred,flux,error\n')
+              for r in rows:
+                  err=str(r['error']).replace('\n',' ')[:500].replace(',',';')
+                  f.write(f"{r['tag']},{r['setup_ok']},{r['fit_ok']},{r['ts']},{r['npred']},{r['flux']},{err}\n")
+          ok=sum(1 for r in rows if r['fit_ok'])
+          ts_numeric=0
+          for r in rows:
+              try:
+                  float(r['ts']); ts_numeric += 1
+              except Exception:
+                  pass
+          print('LIKELIHOOD_FIT_OK_COUNT:', ok)
+          print('TS_NUMERIC_COUNT:', ts_numeric)
+          for r in rows: print(r['tag'], 'TS=', r['ts'], 'FIT_OK=', r['fit_ok'])
+          PY
+
+          LIKE_OK=0
+          if [ "$ENV_RC" = "0" ] && [ "$SIZE_OK" = "7" ]; then
+            $MM run -p $ENV bash -lc "export PFILES='$PFILES'; python $R/work/run_like.py" > $R/logs/likelihood_driver.log 2>&1
+            LIKE_RC=$?
+            grep -q "LIKELIHOOD_FIT_OK_COUNT: 2" $R/logs/likelihood_driver.log && LIKE_OK=2
+            TS_NUMERIC=$(grep "TS_NUMERIC_COUNT:" $R/logs/likelihood_driver.log | tail -1 | awk '{print $2}')
+          else
+            LIKE_RC=999
+            TS_NUMERIC=0
+          fi
+
+          STATUS=R40L_REAL_LIKELIHOOD_TECHNICAL_BLOCK_NOT_PHYSICAL_NULL_NOT_PROOF
+          [ "$LIKE_OK" = "2" ] && [ "$TS_NUMERIC" = "2" ] && STATUS=R40L_REAL_LIKELIHOOD_TS_PILOT_PASS_REVIEW_REQUIRED_NOT_PROOF
+          echo "STATUS: $STATUS" >> $R/results/summary.txt
+          echo "SIZE_OK_COUNT: $SIZE_OK/7" >> $R/results/summary.txt
+          echo "LIKELIHOOD_FIT_OK_COUNT: $LIKE_OK/2" >> $R/results/summary.txt
+          echo "TS_NUMERIC_COUNT: $TS_NUMERIC/2" >> $R/results/summary.txt
+          echo "LIKELIHOOD_RC: $LIKE_RC" >> $R/results/summary.txt
+          echo "TOTAL_BYTES: $TOTAL_BYTES" >> $R/results/summary.txt
+          echo "NO_PROOF=true" >> $R/results/summary.txt
+          if [ -f $R/results/R40L_LIKELIHOOD_RESULTS.csv ]; then cat $R/results/R40L_LIKELIHOOD_RESULTS.csv >> $R/results/summary.txt; fi
+          cat $R/results/summary.txt
+          rm -rf $R/data $R/work $R/pfiles
+          zip -r ${R}_RESULTS_PACKAGE.zip $R/results $R/logs >/dev/null
+          sha256sum ${R}_RESULTS_PACKAGE.zip > ${R}_RESULTS_PACKAGE.zip.sha256.txt
+          echo "SHA256: $(cut -d' ' -f1 ${R}_RESULTS_PACKAGE.zip.sha256.txt)"
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ACIRM_R40L_REAL_FERMIPY_LIKELIHOOD_TS_PILOT_3C279_RESULTS
+          path: |
+            ACIRM_R40L_REAL_FERMIPY_LIKELIHOOD_TS_PILOT_3C279_RESULTS_PACKAGE.zip
+            ACIRM_R40L_REAL_FERMIPY_LIKELIHOOD_TS_PILOT_3C279_RESULTS_PACKAGE.zip.sha256.txt

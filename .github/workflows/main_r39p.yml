@@ -1,0 +1,156 @@
+name: ACIRM R39P 3C279 Strict Config Scaffold No LAT Data No TS
+
+on:
+  workflow_dispatch:
+
+jobs:
+  acirm-r39p-config-scaffold:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Prepare R39P locked config scaffold
+        shell: bash
+        run: |
+          set -u
+          RUN_ID="ACIRM_R39P_3C279_STRICT_CONFIG_SCAFFOLD_NO_LATDATA_NO_TS"
+          mkdir -p "$RUN_ID/results" "$RUN_ID/logs"
+          echo "$RUN_ID" > "$RUN_ID/logs/run_id.txt"
+          echo "START_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$RUN_ID/logs/run_status.txt"
+
+          cat > "$RUN_ID/results/CLAIM_CEILING.txt" <<'EOF'
+          strict configuration scaffold only; no LAT data; no photon selection; no likelihood; no TS; not proof; not discovery; not material production
+          EOF
+
+          cat > "$RUN_ID/results/R39P_LOCKED_3C279_CONFIG.json" <<'EOF'
+          {
+            "run_id": "ACIRM_R39P_3C279_STRICT_CONFIG_SCAFFOLD_NO_LATDATA_NO_TS",
+            "purpose": "locked rerun configuration scaffold only",
+            "target_source": "3C279",
+            "locked_lags_weeks": [4, 8],
+            "locked_axis": "3C279 +4/+8 standard 4FGL likelihood axis",
+            "locked_reference_stage": "R35H_R2",
+            "locked_numeric_reference": {
+              "plus4_ts": 2427.718553,
+              "plus8_ts": 924.805371,
+              "target_min_ts": 924.805371,
+              "target_sum_ts": 3352.523924,
+              "best_control_min_ts": 201.385473,
+              "best_control_sum_ts": 841.990828,
+              "target_min_margin": 723.419898,
+              "target_sum_margin": 2510.533096
+            },
+            "frozen_exclusions": {
+              "no_plus1_branch_rescue": true,
+              "no_3C273_plus12_rescue": true,
+              "no_lag_retuning": true,
+              "no_source_retuning": true,
+              "no_control_dropping_after_results": true
+            },
+            "claim_ceiling": "NO_LATDATA_NO_TS_NOT_PROOF_NOT_DISCOVERY_NOT_MATERIAL_PRODUCTION",
+            "physical_interpretation": "configuration scaffold only; not a physical test and not a physical null"
+          }
+          EOF
+
+          cat > "$RUN_ID/results/R39P_COMMAND_TEMPLATE_NO_EXECUTE.sh" <<'EOF'
+          #!/usr/bin/env bash
+          # ACIRM R39P command template only.
+          # DO NOT EXECUTE in R39P.
+          # No LAT data. No photon selection. No likelihood. No TS.
+          # Locked target: 3C279
+          # Locked lags: +4 weeks and +8 weeks
+          # Future stages may substitute validated event, spacecraft, XML model, ROI, MET windows, IRFs, and catalog paths.
+          # Example placeholders only:
+          # gtselect evclass=<LOCKED> evtype=<LOCKED> ra=<LOCKED_3C279_RA> dec=<LOCKED_3C279_DEC> rad=<LOCKED_ROI> tmin=<LOCKED_TMIN> tmax=<LOCKED_TMAX> emin=<LOCKED_EMIN> emax=<LOCKED_EMAX> infile=<EVENTS> outfile=<SELECTED_EVENTS>
+          # gtmktime scfile=<SPACECRAFT> filter=<LOCKED_GTI_FILTER> roicut=yes evfile=<SELECTED_EVENTS> outfile=<GTI_EVENTS>
+          # gtbin evfile=<GTI_EVENTS> scfile=<SPACECRAFT> outfile=<COUNTS_CUBE> algorithm=CCUBE nxpix=<LOCKED> nypix=<LOCKED> binsz=<LOCKED> coordsys=CEL xref=<LOCKED_3C279_RA> yref=<LOCKED_3C279_DEC> axisrot=0 proj=AIT ebinalg=LOG emin=<LOCKED_EMIN> emax=<LOCKED_EMAX> enumbins=<LOCKED>
+          # gtltcube evfile=<GTI_EVENTS> scfile=<SPACECRAFT> outfile=<LTCUBE> dcostheta=<LOCKED> binsz=<LOCKED>
+          # gtexpcube2 infile=<LTCUBE> cmap=<COUNTS_CUBE> outfile=<EXPCUBE> irfs=<LOCKED_IRFS> nxpix=<LOCKED> nypix=<LOCKED> binsz=<LOCKED> coordsys=CEL xref=<LOCKED_3C279_RA> yref=<LOCKED_3C279_DEC> axisrot=0 proj=AIT ebinalg=LOG emin=<LOCKED_EMIN> emax=<LOCKED_EMAX> enumbins=<LOCKED>
+          # gtlike statistic=BINNED optimizer=<LOCKED_OPTIMIZER> evfile=<GTI_EVENTS> scfile=<SPACECRAFT> expcube=<LTCUBE> cmap=<COUNTS_CUBE> srcmdl=<LOCKED_XML> bexpmap=<EXPCUBE> irfs=<LOCKED_IRFS>
+          EOF
+          chmod +x "$RUN_ID/results/R39P_COMMAND_TEMPLATE_NO_EXECUTE.sh"
+
+          cat > "$RUN_ID/results/R39P_GATES.csv" <<'EOF'
+          gate,status,reason
+          G1_SOURCE_LOCK,PASS,target_source is 3C279
+          G2_LAG_LOCK,PASS,locked lags are +4 and +8 only
+          G3_NUMERIC_REFERENCE_LOCK,PASS,R35H_R2 plus4_ts and plus8_ts recorded
+          G4_NO_LATDATA,PASS,no LAT data downloaded or used
+          G5_NO_TS_NEW,PASS,no likelihood or TS computation executed
+          G6_NO_RESCUE_BRANCHES,PASS,+1 and 3C273 +12 excluded
+          G7_CLAIM_CEILING,PASS,not proof not discovery not material production
+          EOF
+
+          CONFIG="$RUN_ID/results/R39P_LOCKED_3C279_CONFIG.json"
+          TEMPLATE="$RUN_ID/results/R39P_COMMAND_TEMPLATE_NO_EXECUTE.sh"
+          PASS="true"
+          for token in "3C279" "4" "8" "2427.718553" "924.805371" "NO_LATDATA_NO_TS_NOT_PROOF"; do
+            if ! grep -q "$token" "$CONFIG" "$TEMPLATE"; then
+              PASS="false"
+            fi
+          done
+
+          if [ "$PASS" = "true" ]; then
+            STATUS="R39P_3C279_STRICT_CONFIG_SCAFFOLD_PASS_READY_FOR_R39Q_NO_LATDATA_NO_TS_NOT_PROOF"
+          else
+            STATUS="R39P_3C279_STRICT_CONFIG_SCAFFOLD_NEEDS_MANUAL_REVIEW_NOT_PHYSICAL_NULL"
+          fi
+
+          cat > "$RUN_ID/results/R39P_DECISION_SUMMARY.json" <<EOF
+          {
+            "run_id": "$RUN_ID",
+            "status": "$STATUS",
+            "claim_ceiling": "strict config scaffold only; no LAT data; no photon selection; no likelihood; no TS; not proof",
+            "target_source": "3C279",
+            "locked_lags_weeks": [4, 8],
+            "config_lock_pass": "$PASS",
+            "next_step_if_pass": "R39Q minimal safe data-availability planning or R40A strict 3C279 rerun preparation",
+            "physical_interpretation": "configuration scaffold only; not a physical test and not a physical null"
+          }
+          EOF
+
+          cat > "$RUN_ID/results/README_AR.md" <<EOF
+          # R39P
+
+          STATUS: \`$STATUS\`
+
+          هذه حزمة configuration scaffold فقط لمحور 3C279 +4/+8.
+
+          لا LAT data، لا photon selection، لا likelihood، لا TS، ولا proof.
+          EOF
+
+          echo "STATUS: $STATUS"
+          echo "TARGET_SOURCE: 3C279"
+          echo "LOCKED_LAGS: +4,+8"
+          echo "NO_LATDATA: true"
+          echo "NO_TS: true"
+          echo "END_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$RUN_ID/logs/run_status.txt"
+
+      - name: Create manifest and package
+        shell: bash
+        run: |
+          set -u
+          RUN_ID="ACIRM_R39P_3C279_STRICT_CONFIG_SCAFFOLD_NO_LATDATA_NO_TS"
+          MANIFEST="$RUN_ID/results/R39P_MANIFEST_SHA256.csv"
+          echo "filename,size_bytes,sha256" > "$MANIFEST"
+          for f in "$RUN_ID"/results/*; do
+            if [ -f "$f" ] && [ "$(basename "$f")" != "R39P_MANIFEST_SHA256.csv" ]; then
+              SHA=$(sha256sum "$f" | cut -d' ' -f1)
+              SIZE=$(wc -c < "$f")
+              echo "$(basename "$f"),$SIZE,$SHA" >> "$MANIFEST"
+            fi
+          done
+          ZIP_NAME="${RUN_ID}_RESULTS_PACKAGE.zip"
+          zip -r "$ZIP_NAME" "$RUN_ID/results" "$RUN_ID/logs" >/dev/null
+          sha256sum "$ZIP_NAME" > "$ZIP_NAME.sha256.txt"
+          echo "ZIP: $ZIP_NAME"
+          echo "SHA256: $(cut -d' ' -f1 "$ZIP_NAME.sha256.txt")"
+
+      - name: Upload R39P artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ACIRM_R39P_3C279_STRICT_CONFIG_SCAFFOLD_NO_LATDATA_NO_TS_RESULTS
+          path: |
+            ACIRM_R39P_3C279_STRICT_CONFIG_SCAFFOLD_NO_LATDATA_NO_TS_RESULTS_PACKAGE.zip
+            ACIRM_R39P_3C279_STRICT_CONFIG_SCAFFOLD_NO_LATDATA_NO_TS_RESULTS_PACKAGE.zip.sha256.txt
+          if-no-files-found: error

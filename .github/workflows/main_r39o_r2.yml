@@ -1,0 +1,182 @@
+name: acirm-r39o-r2-no-data-command-dry-run
+
+on:
+  workflow_dispatch:
+
+jobs:
+  dry-run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare folders
+        shell: bash
+        run: |
+          set -u
+          RUN_ID="ACIRM_R39O_R2_NO_DATA_COMMAND_LEVEL_FERMITOOLS_DRY_RUN_NO_LATDATA_NO_TS"
+          echo "$RUN_ID" > /tmp/acirm_run_id.txt
+          mkdir -p "$RUN_ID/results" "$RUN_ID/logs"
+          echo "command-level dry run only; no LAT data; no likelihood; no TS; not proof" > "$RUN_ID/results/CLAIM_CEILING.txt"
+
+      - name: Install micromamba
+        shell: bash
+        run: |
+          set +e
+          RUN_ID="$(cat /tmp/acirm_run_id.txt)"
+          MM_ROOT="$PWD/micromamba"
+          mkdir -p "$MM_ROOT"
+          echo "Installing micromamba" | tee "$RUN_ID/logs/micromamba_install.log"
+          curl -L -s https://micro.mamba.pm/api/micromamba/linux-64/latest | tar -xvj -C "$MM_ROOT" bin/micromamba >> "$RUN_ID/logs/micromamba_install.log" 2>&1
+          RC=$?
+          echo "MICROMAMBA_INSTALL_RC=$RC" | tee -a "$RUN_ID/logs/micromamba_install.log"
+          "$MM_ROOT/bin/micromamba" --version > "$RUN_ID/logs/micromamba_version.txt" 2>&1 || true
+          exit 0
+
+      - name: Create Fermitools environment
+        shell: bash
+        run: |
+          set +e
+          RUN_ID="$(cat /tmp/acirm_run_id.txt)"
+          MM="$PWD/micromamba/bin/micromamba"
+          ENV_PREFIX="$PWD/acirm-fermi-env-r39o-r2"
+          echo "$ENV_PREFIX" > "$RUN_ID/logs/env_prefix.txt"
+          echo "START_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$RUN_ID/logs/env_create_status.txt"
+
+          echo "Attempt 1: python=3.11 fermitools fermipy" | tee -a "$RUN_ID/logs/env_create_status.txt"
+          "$MM" create -y -p "$ENV_PREFIX" -c conda-forge -c fermi python=3.11 fermitools fermipy > "$RUN_ID/logs/attempt1_py311_fermitools_fermipy.log" 2>&1
+          RC=$?
+          echo "ATTEMPT1_RC=$RC" | tee -a "$RUN_ID/logs/env_create_status.txt"
+
+          if [ "$RC" -ne 0 ]; then
+            echo "Attempt 2: python=3.11 fermitools only" | tee -a "$RUN_ID/logs/env_create_status.txt"
+            rm -rf "$ENV_PREFIX"
+            "$MM" create -y -p "$ENV_PREFIX" -c conda-forge -c fermi python=3.11 fermitools > "$RUN_ID/logs/attempt2_py311_fermitools_only.log" 2>&1
+            RC=$?
+            echo "ATTEMPT2_RC=$RC" | tee -a "$RUN_ID/logs/env_create_status.txt"
+          fi
+
+          if [ "$RC" -ne 0 ]; then
+            echo "Attempt 3: python=3.11 fermi channel first" | tee -a "$RUN_ID/logs/env_create_status.txt"
+            rm -rf "$ENV_PREFIX"
+            "$MM" create -y -p "$ENV_PREFIX" -c fermi -c conda-forge python=3.11 fermitools > "$RUN_ID/logs/attempt3_py311_fermi_first.log" 2>&1
+            RC=$?
+            echo "ATTEMPT3_RC=$RC" | tee -a "$RUN_ID/logs/env_create_status.txt"
+          fi
+
+          echo "FINAL_ENV_CREATE_RC=$RC" | tee -a "$RUN_ID/logs/env_create_status.txt"
+          echo "END_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)" | tee -a "$RUN_ID/logs/env_create_status.txt"
+          exit 0
+
+      - name: No-data command probes
+        shell: bash
+        run: |
+          set +e
+          RUN_ID="$(cat /tmp/acirm_run_id.txt)"
+          MM="$PWD/micromamba/bin/micromamba"
+          ENV_PREFIX="$(cat "$RUN_ID/logs/env_prefix.txt")"
+          COMMANDS="gtselect gtmktime gtbin gtlike gtmodel gtexpcube2 gtltcube gtpsf"
+          MODULES="numpy astropy scipy pandas matplotlib fermipy"
+
+          echo "command,found,path,help_rc,help_has_output,version_rc,version_has_output,core" > "$RUN_ID/results/R39O_R2_COMMAND_PROBES.csv"
+          CORE_FOUND=0
+          CORE_TOTAL=8
+          HELP_OUTPUT_COUNT=0
+
+          for C in $COMMANDS; do
+            P="$($MM run -p "$ENV_PREFIX" bash -lc "command -v $C" 2>/dev/null)"
+            if [ -n "$P" ]; then FOUND="true"; else FOUND="false"; fi
+            if [ "$FOUND" = "true" ]; then CORE_FOUND=$((CORE_FOUND+1)); fi
+
+            timeout 30s "$MM" run -p "$ENV_PREFIX" bash -lc "$C --help < /dev/null" > "$RUN_ID/logs/${C}_help.log" 2>&1
+            HRC=$?
+            if [ -s "$RUN_ID/logs/${C}_help.log" ]; then HOUT="true"; HELP_OUTPUT_COUNT=$((HELP_OUTPUT_COUNT+1)); else HOUT="false"; fi
+
+            timeout 30s "$MM" run -p "$ENV_PREFIX" bash -lc "$C --version < /dev/null" > "$RUN_ID/logs/${C}_version.log" 2>&1
+            VRC=$?
+            if [ -s "$RUN_ID/logs/${C}_version.log" ]; then VOUT="true"; else VOUT="false"; fi
+
+            echo "$C,$FOUND,$P,$HRC,$HOUT,$VRC,$VOUT,true" >> "$RUN_ID/results/R39O_R2_COMMAND_PROBES.csv"
+          done
+
+          echo "module,import_ok,error,core" > "$RUN_ID/results/R39O_R2_MODULES_CHECK.csv"
+          CORE_MODULES_OK="true"
+          FERMIPY_OK="false"
+          for M in $MODULES; do
+            CORE="false"
+            case "$M" in numpy|astropy) CORE="true";; esac
+            ERR="$($MM run -p "$ENV_PREFIX" python -c "import $M; print('OK')" 2>&1 >/tmp/r39o_r2_mod_out.txt)"
+            RC=$?
+            if [ "$RC" -eq 0 ]; then OK="true"; ERR=""; else OK="false"; fi
+            if [ "$CORE" = "true" ] && [ "$OK" != "true" ]; then CORE_MODULES_OK="false"; fi
+            if [ "$M" = "fermipy" ] && [ "$OK" = "true" ]; then FERMIPY_OK="true"; fi
+            CLEAN_ERR="$(echo "$ERR" | tr '\n' ' ' | tr ',' ';' | cut -c1-500)"
+            echo "$M,$OK,$CLEAN_ERR,$CORE" >> "$RUN_ID/results/R39O_R2_MODULES_CHECK.csv"
+          done
+
+          GTANALYSIS_OK="false"
+          $MM run -p "$ENV_PREFIX" python -c "from fermipy.gtanalysis import GTAnalysis; print('GTAnalysis import OK')" > "$RUN_ID/logs/fermipy_gtanalysis_import.log" 2>&1
+          if grep -q "GTAnalysis import OK" "$RUN_ID/logs/fermipy_gtanalysis_import.log"; then GTANALYSIS_OK="true"; fi
+
+          GTAPP_OK="false"
+          $MM run -p "$ENV_PREFIX" python -c "from GtApp import GtApp; print('GtApp import OK')" > "$RUN_ID/logs/gtapp_import.log" 2>&1
+          if grep -q "GtApp import OK" "$RUN_ID/logs/gtapp_import.log"; then GTAPP_OK="true"; fi
+
+          FINAL_RC="unknown"
+          if [ -f "$RUN_ID/logs/env_create_status.txt" ]; then
+            FINAL_RC="$(grep 'FINAL_ENV_CREATE_RC=' "$RUN_ID/logs/env_create_status.txt" | tail -1 | cut -d= -f2)"
+          fi
+
+          if [ "$FINAL_RC" = "0" ] && [ "$CORE_FOUND" = "$CORE_TOTAL" ] && [ "$CORE_MODULES_OK" = "true" ] && [ "$FERMIPY_OK" = "true" ] && [ "$GTANALYSIS_OK" = "true" ]; then
+            STATUS="R39O_R2_NO_DATA_COMMAND_LEVEL_DRY_RUN_PASS_READY_FOR_R39P_NO_LATDATA_NO_TS_NOT_PROOF"
+          elif [ "$FINAL_RC" = "0" ] && [ "$CORE_FOUND" = "$CORE_TOTAL" ]; then
+            STATUS="R39O_R2_NO_DATA_COMMAND_LEVEL_PARTIAL_PASS_NEEDS_MANUAL_REVIEW_NOT_PHYSICAL_NULL"
+          else
+            STATUS="R39O_R2_NO_DATA_COMMAND_LEVEL_DRY_RUN_TECHNICAL_BLOCK_NOT_PHYSICAL_NULL"
+          fi
+
+          cat > "$RUN_ID/results/R39O_R2_DECISION_SUMMARY.json" <<EOF
+          {
+            "run_id": "$RUN_ID",
+            "status": "$STATUS",
+            "claim_ceiling": "command-level dry run only; no LAT data; no likelihood; no TS; not proof",
+            "env_create_rc": "$FINAL_RC",
+            "core_commands_found": "$CORE_FOUND/$CORE_TOTAL",
+            "help_output_count": "$HELP_OUTPUT_COUNT/$CORE_TOTAL",
+            "fermipy_import_ok": "$FERMIPY_OK",
+            "fermipy_gtanalysis_import_ok": "$GTANALYSIS_OK",
+            "gtapp_import_ok": "$GTAPP_OK",
+            "core_python_modules_ok": "$CORE_MODULES_OK",
+            "physical_interpretation": "technical no-data command probe only; not a physical null and not evidence against 3C279 +4/+8"
+          }
+          EOF
+
+          echo "STATUS: $STATUS"
+          echo "CORE_COMMANDS_FOUND: $CORE_FOUND/$CORE_TOTAL"
+          echo "HELP_OUTPUT_COUNT: $HELP_OUTPUT_COUNT/$CORE_TOTAL"
+          echo "FERMIPY_IMPORT_OK: $FERMIPY_OK"
+          echo "FERMIPY_GTANALYSIS_IMPORT_OK: $GTANALYSIS_OK"
+          echo "GTAPP_IMPORT_OK: $GTAPP_OK"
+          echo "CORE_PYTHON_MODULES_OK: $CORE_MODULES_OK"
+
+      - name: Package results
+        shell: bash
+        run: |
+          set +e
+          RUN_ID="$(cat /tmp/acirm_run_id.txt)"
+          ZIP_NAME="${RUN_ID}_RESULTS_PACKAGE.zip"
+          zip -r "$ZIP_NAME" "$RUN_ID/results" "$RUN_ID/logs" >/dev/null
+          sha256sum "$ZIP_NAME" > "$ZIP_NAME.sha256.txt"
+          echo "ZIP: $ZIP_NAME"
+          echo "SHA256: $(cut -d' ' -f1 "$ZIP_NAME.sha256.txt")"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ACIRM_R39O_R2_NO_DATA_COMMAND_LEVEL_FERMITOOLS_DRY_RUN_NO_LATDATA_NO_TS_RESULTS
+          path: |
+            ACIRM_R39O_R2_NO_DATA_COMMAND_LEVEL_FERMITOOLS_DRY_RUN_NO_LATDATA_NO_TS_RESULTS_PACKAGE.zip
+            ACIRM_R39O_R2_NO_DATA_COMMAND_LEVEL_FERMITOOLS_DRY_RUN_NO_LATDATA_NO_TS_RESULTS_PACKAGE.zip.sha256.txt
+          if-no-files-found: error

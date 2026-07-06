@@ -1,0 +1,151 @@
+name: ACIRM R40C 3C279 URL Availability Probe No Download No TS
+
+on:
+  workflow_dispatch:
+
+jobs:
+  acirm-r40c-url-availability-probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Prepare query spec and probe URLs with HEAD only
+        shell: bash
+        run: |
+          set +e
+          RUN_ID="ACIRM_R40C_3C279_URL_AVAILABILITY_PROBE_HEAD_ONLY_NO_DOWNLOAD_NO_TS"
+          echo "$RUN_ID" > /tmp/acirm_run_id.txt
+          mkdir -p "$RUN_ID/results" "$RUN_ID/logs"
+
+          cat > "$RUN_ID/results/CLAIM_CEILING.txt" <<'EOF'
+          R40C is a URL availability probe only. HEAD requests only. No FITS payload download. No Fermitools execution. No photon selection. No likelihood. No TS. Not proof.
+          EOF
+
+          cat > "$RUN_ID/results/R40C_QUERY_SPEC.csv" <<'EOF'
+          label,lag_week,week,kind,url,download_allowed,execution_allowed
+          ANCHOR,0,286,photon,https://heasarc.gsfc.nasa.gov/FTP/fermi/data/lat/weekly/photon/lat_photon_weekly_w286_p305_v001.fits,false,false
+          ANCHOR,0,286,spacecraft,https://heasarc.gsfc.nasa.gov/FTP/fermi/data/lat/weekly/spacecraft/lat_spacecraft_weekly_w286_p310_v001.fits,false,false
+          TARGET_PLUS_4,4,290,photon,https://heasarc.gsfc.nasa.gov/FTP/fermi/data/lat/weekly/photon/lat_photon_weekly_w290_p305_v001.fits,false,false
+          TARGET_PLUS_4,4,290,spacecraft,https://heasarc.gsfc.nasa.gov/FTP/fermi/data/lat/weekly/spacecraft/lat_spacecraft_weekly_w290_p310_v001.fits,false,false
+          TARGET_PLUS_8,8,294,photon,https://heasarc.gsfc.nasa.gov/FTP/fermi/data/lat/weekly/photon/lat_photon_weekly_w294_p305_v001.fits,false,false
+          TARGET_PLUS_8,8,294,spacecraft,https://heasarc.gsfc.nasa.gov/FTP/fermi/data/lat/weekly/spacecraft/lat_spacecraft_weekly_w294_p310_v001.fits,false,false
+          CONTROL_PLUS_12,12,298,photon,https://heasarc.gsfc.nasa.gov/FTP/fermi/data/lat/weekly/photon/lat_photon_weekly_w298_p305_v001.fits,false,false
+          CONTROL_PLUS_12,12,298,spacecraft,https://heasarc.gsfc.nasa.gov/FTP/fermi/data/lat/weekly/spacecraft/lat_spacecraft_weekly_w298_p310_v001.fits,false,false
+          CONTROL_PLUS_16,16,302,photon,https://heasarc.gsfc.nasa.gov/FTP/fermi/data/lat/weekly/photon/lat_photon_weekly_w302_p305_v001.fits,false,false
+          CONTROL_PLUS_16,16,302,spacecraft,https://heasarc.gsfc.nasa.gov/FTP/fermi/data/lat/weekly/spacecraft/lat_spacecraft_weekly_w302_p310_v001.fits,false,false
+          CONTROL_PLUS_24,24,310,photon,https://heasarc.gsfc.nasa.gov/FTP/fermi/data/lat/weekly/photon/lat_photon_weekly_w310_p305_v001.fits,false,false
+          CONTROL_PLUS_24,24,310,spacecraft,https://heasarc.gsfc.nasa.gov/FTP/fermi/data/lat/weekly/spacecraft/lat_spacecraft_weekly_w310_p310_v001.fits,false,false
+          CONTROL_PLUS_32,32,318,photon,https://heasarc.gsfc.nasa.gov/FTP/fermi/data/lat/weekly/photon/lat_photon_weekly_w318_p305_v001.fits,false,false
+          CONTROL_PLUS_32,32,318,spacecraft,https://heasarc.gsfc.nasa.gov/FTP/fermi/data/lat/weekly/spacecraft/lat_spacecraft_weekly_w318_p310_v001.fits,false,false
+          CONTROL_PLUS_48,48,334,photon,https://heasarc.gsfc.nasa.gov/FTP/fermi/data/lat/weekly/photon/lat_photon_weekly_w334_p305_v001.fits,false,false
+          CONTROL_PLUS_48,48,334,spacecraft,https://heasarc.gsfc.nasa.gov/FTP/fermi/data/lat/weekly/spacecraft/lat_spacecraft_weekly_w334_p310_v001.fits,false,false
+          CONTROL_PLUS_64,64,350,photon,https://heasarc.gsfc.nasa.gov/FTP/fermi/data/lat/weekly/photon/lat_photon_weekly_w350_p305_v001.fits,false,false
+          CONTROL_PLUS_64,64,350,spacecraft,https://heasarc.gsfc.nasa.gov/FTP/fermi/data/lat/weekly/spacecraft/lat_spacecraft_weekly_w350_p310_v001.fits,false,false
+          CATALOG,NA,NA,4fgl_catalog,https://fermi.gsfc.nasa.gov/ssc/data/access/lat/14yr_catalog/gll_psc_v35.fit,false,false
+          EOF
+
+          echo "label,kind,url,http_code,content_length,accept_ranges,probe_status" > "$RUN_ID/results/R40C_URL_HEAD_PROBES.csv"
+          TOTAL=0
+          OK=0
+          FAIL=0
+          tail -n +2 "$RUN_ID/results/R40C_QUERY_SPEC.csv" | while IFS=',' read -r label lag_week week kind url download_allowed execution_allowed; do
+            TOTAL_FILE="$RUN_ID/logs/total.tmp"
+            OK_FILE="$RUN_ID/logs/ok.tmp"
+            FAIL_FILE="$RUN_ID/logs/fail.tmp"
+            if [ ! -f "$TOTAL_FILE" ]; then echo 0 > "$TOTAL_FILE"; fi
+            if [ ! -f "$OK_FILE" ]; then echo 0 > "$OK_FILE"; fi
+            if [ ! -f "$FAIL_FILE" ]; then echo 0 > "$FAIL_FILE"; fi
+            T=$(cat "$TOTAL_FILE"); T=$((T+1)); echo "$T" > "$TOTAL_FILE"
+
+            SAFE_NAME=$(echo "$label"_"$kind" | tr -cd 'A-Za-z0-9_')
+            HEADER_FILE="$RUN_ID/logs/head_${SAFE_NAME}.txt"
+            curl -L -I --max-time 45 --retry 1 --retry-delay 2 "$url" > "$HEADER_FILE" 2>&1
+            RC=$?
+            CODE=$(awk '/^HTTP\// {code=$2} END {if(code=="") code="NA"; print code}' "$HEADER_FILE")
+            CLEN=$(awk 'BEGIN{IGNORECASE=1} /^content-length:/ {v=$0; sub(/^[^:]*:[ ]*/,"",v); gsub(/\r/,"",v); print v; exit}' "$HEADER_FILE")
+            AR=$(awk 'BEGIN{IGNORECASE=1} /^accept-ranges:/ {v=$0; sub(/^[^:]*:[ ]*/,"",v); gsub(/\r/,"",v); print v; exit}' "$HEADER_FILE")
+            if [ -z "$CLEN" ]; then CLEN="NA"; fi
+            if [ -z "$AR" ]; then AR="NA"; fi
+
+            if [ "$RC" -eq 0 ] && { [ "$CODE" = "200" ] || [ "$CODE" = "206" ] || [ "$CODE" = "301" ] || [ "$CODE" = "302" ] || [ "$CODE" = "303" ] || [ "$CODE" = "307" ] || [ "$CODE" = "308" ]; }; then
+              STATUS="HEAD_OK"
+              O=$(cat "$OK_FILE"); O=$((O+1)); echo "$O" > "$OK_FILE"
+            else
+              STATUS="HEAD_FAIL_RC_${RC}"
+              F=$(cat "$FAIL_FILE"); F=$((F+1)); echo "$F" > "$FAIL_FILE"
+            fi
+            echo "$label,$kind,$url,$CODE,$CLEN,$AR,$STATUS" >> "$RUN_ID/results/R40C_URL_HEAD_PROBES.csv"
+          done
+
+          TOTAL=$(cat "$RUN_ID/logs/total.tmp" 2>/dev/null || echo 0)
+          OK=$(cat "$RUN_ID/logs/ok.tmp" 2>/dev/null || echo 0)
+          FAIL=$(cat "$RUN_ID/logs/fail.tmp" 2>/dev/null || echo 0)
+
+          if [ "$TOTAL" = "19" ] && [ "$OK" = "19" ] && [ "$FAIL" = "0" ]; then
+            STATUS="R40C_3C279_URL_AVAILABILITY_HEAD_ONLY_PASS_READY_FOR_R40D_NO_DOWNLOAD_NO_TS_NOT_PROOF"
+          elif [ "$OK" != "0" ]; then
+            STATUS="R40C_3C279_URL_AVAILABILITY_PARTIAL_HEAD_PASS_NEEDS_MANUAL_REVIEW_NOT_PHYSICAL_NULL"
+          else
+            STATUS="R40C_3C279_URL_AVAILABILITY_HEAD_PROBE_FAILED_TECHNICAL_BLOCK_NOT_PHYSICAL_NULL"
+          fi
+
+          cat > "$RUN_ID/results/R40C_DECISION_SUMMARY.json" <<EOF
+          {
+            "run_id": "$RUN_ID",
+            "status": "$STATUS",
+            "target_source": "3C279",
+            "target_4fgl_name": "4FGL J1256.1-0547",
+            "locked_lags_weeks": [4, 8],
+            "query_rows_expected": 19,
+            "url_probe_method": "HEAD_ONLY",
+            "head_total": $TOTAL,
+            "head_ok": $OK,
+            "head_fail": $FAIL,
+            "no_latdata_download": true,
+            "no_fermitools_execution": true,
+            "no_photon_selection": true,
+            "no_likelihood": true,
+            "no_ts": true,
+            "claim_ceiling": "URL availability probe only; HEAD requests only; no FITS payload download; no Fermitools execution; no TS; not proof",
+            "physical_interpretation": "not a physical test and not a physical null"
+          }
+          EOF
+
+          echo "gate,status" > "$RUN_ID/results/R40C_GATES.csv"
+          echo "SOURCE_LOCK,PASS" >> "$RUN_ID/results/R40C_GATES.csv"
+          echo "PLUS4_PLUS8_LOCK,PASS" >> "$RUN_ID/results/R40C_GATES.csv"
+          echo "QUERY_ROWS_19,$([ "$TOTAL" = "19" ] && echo PASS || echo FAIL)" >> "$RUN_ID/results/R40C_GATES.csv"
+          echo "HEAD_PROBES_OK,$([ "$OK" = "19" ] && echo PASS || echo REVIEW)" >> "$RUN_ID/results/R40C_GATES.csv"
+          echo "NO_LATDATA_DOWNLOAD,PASS" >> "$RUN_ID/results/R40C_GATES.csv"
+          echo "NO_FERMITOOLS_EXECUTION,PASS" >> "$RUN_ID/results/R40C_GATES.csv"
+          echo "NO_TS,PASS" >> "$RUN_ID/results/R40C_GATES.csv"
+
+          echo "Next step: R40D may build a strict tiny download manifest, but should not download FITS payload unless explicitly approved." > "$RUN_ID/results/R40D_NEXT_ACTION_PLAN.txt"
+          echo "STATUS: $STATUS" > "$RUN_ID/results/README.txt"
+
+          (cd "$RUN_ID/results" && sha256sum CLAIM_CEILING.txt R40C_DECISION_SUMMARY.json R40C_GATES.csv R40C_QUERY_SPEC.csv R40C_URL_HEAD_PROBES.csv R40D_NEXT_ACTION_PLAN.txt README.txt > R40C_MANIFEST_SHA256.csv)
+
+          ZIP_NAME="${RUN_ID}_RESULTS_PACKAGE.zip"
+          zip -r "$ZIP_NAME" "$RUN_ID/results" "$RUN_ID/logs" >/dev/null
+          sha256sum "$ZIP_NAME" > "$ZIP_NAME.sha256.txt"
+
+          echo "STATUS: $STATUS"
+          echo "TARGET_SOURCE: 3C279"
+          echo "LOCKED_LAGS: +4,+8"
+          echo "HEAD_OK: $OK/$TOTAL"
+          echo "NO_LATDATA_DOWNLOAD: true"
+          echo "NO_TS: true"
+          echo "ZIP: $ZIP_NAME"
+          echo "SHA256: $(cut -d' ' -f1 "$ZIP_NAME.sha256.txt")"
+
+      - name: Upload R40C artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ACIRM_R40C_3C279_URL_AVAILABILITY_PROBE_HEAD_ONLY_NO_DOWNLOAD_NO_TS_RESULTS
+          path: |
+            ACIRM_R40C_3C279_URL_AVAILABILITY_PROBE_HEAD_ONLY_NO_DOWNLOAD_NO_TS_RESULTS_PACKAGE.zip
+            ACIRM_R40C_3C279_URL_AVAILABILITY_PROBE_HEAD_ONLY_NO_DOWNLOAD_NO_TS_RESULTS_PACKAGE.zip.sha256.txt
+          if-no-files-found: error

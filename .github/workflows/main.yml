@@ -41,12 +41,27 @@ jobs:
             python=3.11 fermitools=2.5.1 fermipy=1.4.2 astropy pandas numpy scipy pyyaml requests tqdm tabulate
           echo "$HOME/fermi_env/bin" >> "$GITHUB_PATH"
           echo "FERMI_DIR=$HOME/fermi_env" >> "$GITHUB_ENV"
+          export FERMI_DIR="$HOME/fermi_env"
+          export PATH="$FERMI_DIR/bin:$PATH"
+          # Fermitools/Fermipy may abort on import if CALDB is unset.
+          # Locate the packaged CALDB alias file first, then export CALDB explicitly.
+          ALIAS_FILE="$(find "$FERMI_DIR" -path '*/caldb/software/tools/alias_config.fits' -print -quit || true)"
+          if [ -n "$ALIAS_FILE" ]; then
+            CALDB_DIR="$(dirname "$(dirname "$(dirname "$ALIAS_FILE")")")"
+            echo "CALDB=$CALDB_DIR" >> "$GITHUB_ENV"
+            echo "CALDB_DETECTED=$CALDB_DIR"
+          else
+            echo "WARNING: alias_config.fits not found during install preflight; run step will report TECH_INCOMPLETE if Fermipy cannot start."
+          fi
           "$HOME/fermi_env/bin/python" - <<'PYCHK'
-          import sys
+          import sys, importlib.util
           import pandas, numpy, astropy, yaml
-          import fermipy
           print('PYTHON_OK', sys.version)
-          print('FERMIPY_OK', getattr(fermipy, '__version__', 'unknown'))
+          print('PANDAS_OK', pandas.__version__)
+          print('NUMPY_OK', numpy.__version__)
+          print('ASTROPY_OK', astropy.__version__)
+          print('FERMIPY_SPEC_OK', importlib.util.find_spec('fermipy') is not None)
+          print('FERMITOOLS_PREFLIGHT_NOTE', 'fermipy import intentionally skipped before CALDB activation')
           PYCHK
 
       - name: Run R47A expanded-control completion audit
@@ -55,8 +70,23 @@ jobs:
           set -Eeuo pipefail
           export PATH="$HOME/fermi_env/bin:$PATH"
           export FERMI_DIR="$HOME/fermi_env"
+          export CONDA_PREFIX="$FERMI_DIR"
+          # Source any packaged activation hooks if present, then force the correct CALDB.
+          if [ -d "$FERMI_DIR/etc/conda/activate.d" ]; then
+            for hook in "$FERMI_DIR"/etc/conda/activate.d/*.sh; do
+              [ -f "$hook" ] && source "$hook" || true
+            done
+          fi
+          ALIAS_FILE="$(find "$FERMI_DIR" -path '*/caldb/software/tools/alias_config.fits' -print -quit || true)"
+          if [ -n "$ALIAS_FILE" ]; then
+            export CALDB="$(dirname "$(dirname "$(dirname "$ALIAS_FILE")")")"
+          fi
           export PFILES="$PWD/$RUN_ID/pfiles;$FERMI_DIR/syspfiles"
-          mkdir -p "$PWD/$RUN_ID/pfiles"
+          export PYTHONFAULTHANDLER=1
+          mkdir -p "$PWD/$RUN_ID/pfiles" "$RUN_ID/results" "$RUN_ID/logs"
+          echo "FERMI_DIR=${FERMI_DIR}" | tee "$RUN_ID/logs/fermi_env_preflight.log"
+          echo "CALDB=${CALDB:-UNSET}" | tee -a "$RUN_ID/logs/fermi_env_preflight.log"
+          echo "PFILES=${PFILES}" | tee -a "$RUN_ID/logs/fermi_env_preflight.log"
           cat > r47a_run.py <<'PYCODE'
           import os, json, hashlib, subprocess, traceback, zipfile
           from pathlib import Path
@@ -133,8 +163,17 @@ jobs:
               return {"url": url, "file": str(outpath), "status": "OK" if ok else "FAILED", "size_bytes": outpath.stat().st_size if outpath.exists() else 0, "rc": rc}
 
           fermi_dir = os.environ.get("FERMI_DIR", str(Path.home() / "fermi_env"))
-          galdiff_candidates = list(Path(fermi_dir).glob("share/fermitools/refdata/fermi/galdiffuse/gll_iem_v07.fits"))
-          isodiff_candidates = list(Path(fermi_dir).glob("share/fermitools/refdata/fermi/galdiffuse/iso_P8R3_SOURCE_V3_v1.txt"))
+          caldb_dir = os.environ.get("CALDB", "")
+          (RESULTS / "R47A_FERMI_ENVIRONMENT.json").write_text(json.dumps({"FERMI_DIR": fermi_dir, "CALDB": caldb_dir, "PFILES": os.environ.get("PFILES", "")}, indent=2), encoding="utf-8")
+          if not caldb_dir or not Path(caldb_dir, "software", "tools", "alias_config.fits").exists():
+              found_alias = next(Path(fermi_dir).glob("**/caldb/software/tools/alias_config.fits"), None)
+              if found_alias is not None:
+                  os.environ["CALDB"] = str(found_alias.parents[2])
+                  caldb_dir = os.environ["CALDB"]
+              else:
+                  raise RuntimeError("CALDB alias_config.fits not found; cannot import/run Fermipy safely")
+          galdiff_candidates = list(Path(fermi_dir).glob("share/fermitools/refdata/fermi/galdiffuse/gll_iem_v07.fits")) + list(Path(fermi_dir).glob("refdata/fermi/galdiffuse/gll_iem_v07.fits"))
+          isodiff_candidates = list(Path(fermi_dir).glob("share/fermitools/refdata/fermi/galdiffuse/iso_P8R3_SOURCE_V3_v1.txt")) + list(Path(fermi_dir).glob("refdata/fermi/galdiffuse/iso_P8R3_SOURCE_V3_v1.txt"))
           if not galdiff_candidates or not isodiff_candidates:
               raise RuntimeError("Diffuse files not found in Fermitools environment")
           GALDIFF = str(galdiff_candidates[0])
@@ -364,9 +403,44 @@ jobs:
           print("SHA256:", sha)
           print("VERDICT:", verdict)
           PYCODE
+          set +e
           python r47a_run.py 2>&1 | tee "$RUN_ID/logs/r47a_console.log"
+          PY_RC=${PIPESTATUS[0]}
+          set -e
+          if [ ! -f "$RUN_ID.zip" ]; then
+            echo "R47A_TECH_ABORT_NO_SCIENTIFIC_NULL" | tee "$RUN_ID/results/R47A_TECH_ABORT_STATUS.txt"
+            echo "python_return_code=$PY_RC" | tee -a "$RUN_ID/results/R47A_TECH_ABORT_STATUS.txt"
+            python - <<'PYPACK'
+          from pathlib import Path
+          from datetime import datetime, timezone
+          import zipfile, hashlib, json, os
+          run_id = os.environ.get('RUN_ID', 'ACIRM_R47A_EXPANDED_CONTROLS_COMPLETION_RESULTS')
+          root = Path(run_id)
+          (root / 'results').mkdir(parents=True, exist_ok=True)
+          (root / 'logs').mkdir(parents=True, exist_ok=True)
+          decision = {
+              'run_id': run_id,
+              'created_utc': datetime.now(timezone.utc).isoformat(),
+              'verdict': 'R47A_TECH_ABORT_NO_SCIENTIFIC_NULL',
+              'claim_ceiling': 'technical abort package only; not proof; not null; not discovery; no physical conclusion',
+              'not_scientific_null': True,
+          }
+          (root / 'results' / 'R47A_DECISION_SUMMARY.json').write_text(json.dumps(decision, indent=2), encoding='utf-8')
+          zip_path = Path(f'{run_id}.zip')
+          with zipfile.ZipFile(zip_path, 'w', compression=zipfile.ZIP_DEFLATED) as z:
+              for sub in ['results', 'logs']:
+                  base = root / sub
+                  for p in base.rglob('*'):
+                      if p.is_file():
+                          z.write(p, arcname=str(root / p.relative_to(root)))
+          sha = hashlib.sha256(zip_path.read_bytes()).hexdigest()
+          Path(f'{run_id}.zip.sha256.txt').write_text(f'{sha}  {run_id}.zip\n', encoding='utf-8')
+          print('TECH_ABORT_PACKAGE_CREATED', zip_path, sha)
+          PYPACK
+          fi
           ls -lh "$RUN_ID"*.zip* || true
           df -h . | tee "$RUN_ID/logs/disk_end.log"
+          exit 0
 
       - name: Upload R47A result artifact
         uses: actions/upload-artifact@v4

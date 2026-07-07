@@ -1,1 +1,379 @@
+name: ACIRM R47A Expanded Controls Completion
 
+"on":
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  RUN_ID: ACIRM_R47A_EXPANDED_CONTROLS_COMPLETION_RESULTS
+
+jobs:
+  r47a-expanded-controls:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Prepare run folders
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$RUN_ID" "$RUN_ID/results" "$RUN_ID/logs" "$RUN_ID/data" "$RUN_ID/work" "$RUN_ID/pfiles"
+          echo "RUN_ID=$RUN_ID" >> "$GITHUB_ENV"
+          echo "START_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+          df -h . | tee "$RUN_ID/logs/disk_start.log"
+
+      - name: Install system helpers
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y wget curl bzip2 ca-certificates coreutils
+
+      - name: Install micromamba and Fermitools/Fermipy
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$HOME/micromamba-bin"
+          curl -L --retry 5 --retry-delay 10 https://micro.mamba.pm/api/micromamba/linux-64/latest | tar -xvj -C "$HOME/micromamba-bin" bin/micromamba
+          "$HOME/micromamba-bin/bin/micromamba" create -y -p "$HOME/fermi_env" -c conda-forge -c fermi \
+            python=3.11 fermitools=2.5.1 fermipy=1.4.2 astropy pandas numpy scipy pyyaml requests tqdm tabulate
+          echo "$HOME/fermi_env/bin" >> "$GITHUB_PATH"
+          echo "FERMI_DIR=$HOME/fermi_env" >> "$GITHUB_ENV"
+          "$HOME/fermi_env/bin/python" - <<'PYCHK'
+          import sys
+          import pandas, numpy, astropy, yaml
+          import fermipy
+          print('PYTHON_OK', sys.version)
+          print('FERMIPY_OK', getattr(fermipy, '__version__', 'unknown'))
+          PYCHK
+
+      - name: Run R47A expanded-control completion audit
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          export PATH="$HOME/fermi_env/bin:$PATH"
+          export FERMI_DIR="$HOME/fermi_env"
+          export PFILES="$PWD/$RUN_ID/pfiles;$FERMI_DIR/syspfiles"
+          mkdir -p "$PWD/$RUN_ID/pfiles"
+          cat > r47a_run.py <<'PYCODE'
+          import os, json, hashlib, subprocess, traceback, zipfile
+          from pathlib import Path
+          from datetime import datetime, timezone
+          import pandas as pd
+          import numpy as np
+
+          RUN_ID = os.environ.get("RUN_ID", "ACIRM_R47A_EXPANDED_CONTROLS_COMPLETION_RESULTS")
+          ROOT = Path(RUN_ID)
+          RESULTS = ROOT / "results"
+          LOGS = ROOT / "logs"
+          DATA = ROOT / "data"
+          WORK = ROOT / "work"
+          for p in [RESULTS, LOGS, DATA, WORK]:
+              p.mkdir(parents=True, exist_ok=True)
+
+          # Locked from R40N/R40R/R40T/R46/R47. No source retuning, no window retuning.
+          LOCKED = {
+              "source_label": "3C279",
+              "target_source": "4FGL J1256.1-0547",
+              "ra_deg": 194.04150390625,
+              "dec_deg": -5.788700103759766,
+              "irfs": "P8R3_SOURCE_V3",
+              "evclass": 128,
+              "evtype": 3,
+              "zmax": 90,
+              "emax_mev": 300000,
+              "src_roiwidth_deg": 30.0,
+              "catalog_url": "https://fermi.gsfc.nasa.gov/ssc/data/access/lat/14yr_catalog/gll_psc_v35.fit",
+              "locked_rows": {
+                  "E300": {
+                      "P4": {"week": 290, "ts": 2161.329863160313},
+                      "P8": {"week": 294, "ts": 947.2909592286205},
+                      "C310": {"week": 310, "ts": 634.6586938330279},
+                      "target_min_ts": 947.2909592286205,
+                      "emin_mev": 300,
+                      "binsz_deg": 0.2,
+                  },
+                  "BINSZ010": {
+                      "P4": {"week": 290, "ts": 2667.142631913195},
+                      "P8": {"week": 294, "ts": 1298.9194615430806},
+                      "C310": {"week": 310, "ts": 784.3474092030756},
+                      "target_min_ts": 1298.9194615430806,
+                      "emin_mev": 100,
+                      "binsz_deg": 0.1,
+                  },
+              },
+              "missing_controls": [
+                  {"tag": "C298", "role": "CONTROL_PLUS_12", "week": 298, "tmin_met": 413947636.0, "tmax_met": 414547993.0},
+                  {"tag": "C302", "role": "CONTROL_PLUS_16", "week": 302, "tmin_met": 416366090.0, "tmax_met": 416965493.0},
+                  {"tag": "C318", "role": "CONTROL_PLUS_32", "week": 318, "tmin_met": 426043565.0, "tmax_met": 426643680.0},
+                  {"tag": "C334", "role": "CONTROL_PLUS_48", "week": 334, "tmin_met": 435718228.0, "tmax_met": 436323087.0},
+                  {"tag": "C350", "role": "CONTROL_PLUS_64", "week": 350, "tmin_met": 445396594.0, "tmax_met": 446002029.0},
+              ],
+              "claim_ceiling": "expanded controls completion only; not proof; not discovery; not final physical law; no source/window retuning",
+          }
+          (RESULTS / "R47A_LOCKED_CONTEXT.json").write_text(json.dumps(LOCKED, indent=2), encoding="utf-8")
+
+          def run(cmd, logname, timeout=None):
+              log_path = LOGS / logname
+              with log_path.open("w", encoding="utf-8") as f:
+                  f.write("CMD: " + " ".join(map(str, cmd)) + "\n")
+                  f.flush()
+                  p = subprocess.run(cmd, stdout=f, stderr=subprocess.STDOUT, text=True, timeout=timeout)
+                  f.write(f"\nRC={p.returncode}\n")
+                  return p.returncode
+
+          def download(url, outpath, logname):
+              outpath = Path(outpath)
+              if outpath.exists() and outpath.stat().st_size > 0:
+                  return {"url": url, "file": str(outpath), "status": "CACHED", "size_bytes": outpath.stat().st_size, "rc": 0}
+              rc = run(["bash", "-lc", f"wget -nv -t 5 --retry-connrefused --timeout=60 -O '{outpath}' '{url}'"], logname, timeout=1200)
+              ok = rc == 0 and outpath.exists() and outpath.stat().st_size > 0
+              return {"url": url, "file": str(outpath), "status": "OK" if ok else "FAILED", "size_bytes": outpath.stat().st_size if outpath.exists() else 0, "rc": rc}
+
+          fermi_dir = os.environ.get("FERMI_DIR", str(Path.home() / "fermi_env"))
+          galdiff_candidates = list(Path(fermi_dir).glob("share/fermitools/refdata/fermi/galdiffuse/gll_iem_v07.fits"))
+          isodiff_candidates = list(Path(fermi_dir).glob("share/fermitools/refdata/fermi/galdiffuse/iso_P8R3_SOURCE_V3_v1.txt"))
+          if not galdiff_candidates or not isodiff_candidates:
+              raise RuntimeError("Diffuse files not found in Fermitools environment")
+          GALDIFF = str(galdiff_candidates[0])
+          ISODIFF = str(isodiff_candidates[0])
+          (RESULTS / "diffuse_paths.txt").write_text(f"GALDIFF={GALDIFF}\nISODIFF={ISODIFF}\n", encoding="utf-8")
+
+          download_rows = []
+          catalog_file = DATA / "gll_psc_v35.fit"
+          download_rows.append(download(LOCKED["catalog_url"], catalog_file, "dl_catalog.log"))
+          for c in LOCKED["missing_controls"]:
+              week = c["week"]
+              photon = DATA / f"lat_photon_weekly_w{week:03d}_p305_v001.fits"
+              spacecraft = DATA / f"lat_spacecraft_weekly_w{week:03d}_p310_v001.fits"
+              c["photon_file"] = str(photon)
+              c["spacecraft_file"] = str(spacecraft)
+              download_rows.append(download(f"https://heasarc.gsfc.nasa.gov/FTP/fermi/data/lat/weekly/photon/lat_photon_weekly_w{week:03d}_p305_v001.fits", photon, f"dl_{c['tag']}_photon.log"))
+              download_rows.append(download(f"https://heasarc.gsfc.nasa.gov/FTP/fermi/data/lat/weekly/spacecraft/lat_spacecraft_weekly_w{week:03d}_p310_v001.fits", spacecraft, f"dl_{c['tag']}_spacecraft.log"))
+          pd.DataFrame(download_rows).to_csv(RESULTS / "R47A_DOWNLOAD_STATUS.csv", index=False)
+          failed = [r for r in download_rows if r["status"] == "FAILED"]
+          if failed:
+              (RESULTS / "R47A_TECH_INCOMPLETE_DOWNLOAD_FAILURE.json").write_text(json.dumps(failed, indent=2), encoding="utf-8")
+              raise RuntimeError("Download failure: cannot run likelihood safely")
+
+          def run_fermipy(axis_name, control):
+              from fermipy.gtanalysis import GTAnalysis
+              axis = LOCKED["locked_rows"][axis_name]
+              tag = control["tag"]
+              workdir = WORK / f"fermipy_{axis_name}_{tag}"
+              workdir.mkdir(parents=True, exist_ok=True)
+              cfg = {
+                  "data": {"evfile": control["photon_file"], "scfile": control["spacecraft_file"]},
+                  "binning": {"roiwidth": 24.0, "binsz": axis["binsz_deg"], "binsperdec": 4, "coordsys": "CEL", "proj": "AIT"},
+                  "selection": {
+                      "ra": LOCKED["ra_deg"],
+                      "dec": LOCKED["dec_deg"],
+                      "tmin": control["tmin_met"],
+                      "tmax": control["tmax_met"],
+                      "emin": axis["emin_mev"],
+                      "emax": LOCKED["emax_mev"],
+                      "zmax": LOCKED["zmax"],
+                      "evclass": LOCKED["evclass"],
+                      "evtype": LOCKED["evtype"],
+                      "target": LOCKED["target_source"],
+                  },
+                  "gtlike": {"irfs": LOCKED["irfs"], "edisp": False},
+                  "model": {"src_roiwidth": LOCKED["src_roiwidth_deg"], "galdiff": GALDIFF, "isodiff": ISODIFF, "catalogs": [str(catalog_file)]},
+                  "fileio": {"workdir": str(workdir), "outdir": str(workdir), "logfile": str(LOGS / f"fermipy_{axis_name}_{tag}.log")},
+                  "logging": {"verbosity": 3},
+              }
+              row = {
+                  "axis": axis_name,
+                  "tag": tag,
+                  "role": control["role"],
+                  "week": control["week"],
+                  "tmin_met": control["tmin_met"],
+                  "tmax_met": control["tmax_met"],
+                  "emin_mev": axis["emin_mev"],
+                  "binsz_deg": axis["binsz_deg"],
+                  "target_source": LOCKED["target_source"],
+                  "setup_ok": False,
+                  "optimize_ok": False,
+                  "fit_ok": False,
+                  "ts": None,
+                  "npred": None,
+                  "flux": None,
+                  "fit_quality": None,
+                  "locked_target_min_ts": axis["target_min_ts"],
+                  "pass_vs_locked_target_min": None,
+                  "error": "",
+              }
+              try:
+                  gta = GTAnalysis(cfg, logging={"verbosity": 3})
+                  gta.setup()
+                  row["setup_ok"] = True
+                  try:
+                      gta.optimize()
+                      row["optimize_ok"] = True
+                  except Exception as e:
+                      row["error"] += "OPTIMIZE_WARNING: " + repr(e) + "\n"
+                  try:
+                      fitres = gta.fit(optimizer="NEWMINUIT", reoptimize=True)
+                      row["fit_ok"] = True
+                      if isinstance(fitres, dict):
+                          row["fit_quality"] = fitres.get("fit_quality", None)
+                  except Exception as e:
+                      row["error"] += "FIT_ERROR: " + repr(e) + "\n"
+                  try:
+                      row["ts"] = float(gta.like.Ts(LOCKED["target_source"]))
+                  except Exception:
+                      try:
+                          src = gta.roi.get_source_by_name(LOCKED["target_source"])
+                          row["ts"] = float(src["ts"] if isinstance(src, dict) else src.ts)
+                      except Exception as e:
+                          row["error"] += "TS_EXTRACTION_ERROR: " + repr(e) + "\n"
+                  try:
+                      row["npred"] = float(gta.like.NpredValue(LOCKED["target_source"]))
+                  except Exception:
+                      pass
+                  try:
+                      src = gta.roi.get_source_by_name(LOCKED["target_source"])
+                      row["flux"] = float(src["flux"] if isinstance(src, dict) else src.flux)
+                  except Exception:
+                      pass
+                  if row["ts"] is not None and np.isfinite(row["ts"]):
+                      row["pass_vs_locked_target_min"] = bool(row["ts"] < axis["target_min_ts"])
+              except Exception as e:
+                  row["error"] += "RUN_ERROR: " + repr(e) + "\n" + traceback.format_exc(limit=20)
+              return row
+
+          all_rows = []
+          for axis_name in ["E300", "BINSZ010"]:
+              for c in LOCKED["missing_controls"]:
+                  print(f"[R47A] Running {axis_name} {c['tag']} week {c['week']}", flush=True)
+                  row = run_fermipy(axis_name, c)
+                  all_rows.append(row)
+                  pd.DataFrame(all_rows).to_csv(RESULTS / "R47A_EXPANDED_CONTROL_RESULTS_PARTIAL.csv", index=False)
+          res = pd.DataFrame(all_rows)
+          res.to_csv(RESULTS / "R47A_EXPANDED_CONTROL_RESULTS.csv", index=False)
+
+          combined = []
+          for axis_name in ["E300", "BINSZ010"]:
+              locked = LOCKED["locked_rows"][axis_name]
+              for tag in ["P4", "P8", "C310"]:
+                  combined.append({
+                      "axis": axis_name,
+                      "tag": tag,
+                      "role": "LOCKED_TARGET" if tag in ["P4", "P8"] else "LOCKED_CONTROL",
+                      "week": locked[tag]["week"],
+                      "ts": locked[tag]["ts"],
+                      "source": "LOCKED_R40R_OR_R40T",
+                      "fit_ok": True,
+                      "locked_target_min_ts": locked["target_min_ts"],
+                      "pass_vs_locked_target_min": (tag in ["P4", "P8"] or locked[tag]["ts"] < locked["target_min_ts"]),
+                  })
+              for _, r in res[res["axis"] == axis_name].iterrows():
+                  combined.append({
+                      "axis": axis_name,
+                      "tag": r["tag"],
+                      "role": r["role"],
+                      "week": r["week"],
+                      "ts": r["ts"],
+                      "source": "R47A_NEW_CONTROL_COMPLETION",
+                      "fit_ok": r["fit_ok"],
+                      "locked_target_min_ts": r["locked_target_min_ts"],
+                      "pass_vs_locked_target_min": r["pass_vs_locked_target_min"],
+                  })
+          combined_df = pd.DataFrame(combined)
+          combined_df.to_csv(RESULTS / "R47A_AXIS_COMPARISON_WITH_LOCKED_TARGETS.csv", index=False)
+
+          axis_summary = []
+          for axis_name in ["E300", "BINSZ010"]:
+              ax = combined_df[combined_df["axis"] == axis_name].copy()
+              controls = ax[ax["role"].astype(str).str.contains("CONTROL", na=False)]
+              new_controls = res[res["axis"] == axis_name]
+              locked_min = LOCKED["locked_rows"][axis_name]["target_min_ts"]
+              max_control = pd.to_numeric(controls["ts"], errors="coerce").max()
+              numeric_new_count = pd.to_numeric(new_controls["ts"], errors="coerce").notna().sum()
+              fit_ok_new_count = int(new_controls["fit_ok"].fillna(False).sum())
+              pass_axis = bool(fit_ok_new_count == 5 and numeric_new_count == 5 and max_control < locked_min)
+              axis_summary.append({
+                  "axis": axis_name,
+                  "locked_target_min_ts": locked_min,
+                  "max_control_ts_including_C310": max_control,
+                  "margin_target_min_minus_max_control": locked_min - max_control if pd.notna(max_control) else None,
+                  "new_control_fit_ok_count": fit_ok_new_count,
+                  "new_control_numeric_ts_count": int(numeric_new_count),
+                  "axis_pass": pass_axis,
+              })
+          axis_df = pd.DataFrame(axis_summary)
+          axis_df.to_csv(RESULTS / "R47A_AXIS_SUMMARY.csv", index=False)
+
+          if len(axis_df) == 2 and axis_df["axis_pass"].all():
+              verdict = "R47A_FULL_PASS_EXPANDED_CONTROLS_COMPLETED_FOR_E300_AND_BINSZ010_NOT_PROOF"
+          elif axis_df["axis_pass"].any():
+              verdict = "R47A_PARTIAL_AXIS_PASS_OTHER_AXIS_INCOMPLETE_OR_LIMITED_NOT_PROOF"
+          elif res["fit_ok"].sum() < 10 or pd.to_numeric(res["ts"], errors="coerce").notna().sum() < 10:
+              verdict = "R47A_TECH_INCOMPLETE_NO_SCIENTIFIC_NULL"
+          else:
+              verdict = "R47A_CONTROL_CHALLENGE_DO_NOT_UPGRADE_CLAIM"
+
+          decision = {
+              "run_id": RUN_ID,
+              "created_utc": datetime.now(timezone.utc).isoformat(),
+              "verdict": verdict,
+              "new_rows_attempted": int(len(res)),
+              "new_fit_ok_count": int(res["fit_ok"].fillna(False).sum()),
+              "new_numeric_ts_count": int(pd.to_numeric(res["ts"], errors="coerce").notna().sum()),
+              "axis_summary": axis_summary,
+              "claim_ceiling": LOCKED["claim_ceiling"],
+              "not_proof": True,
+              "not_discovery": True,
+              "not_final_physical_law": True,
+          }
+          (RESULTS / "R47A_DECISION_SUMMARY.json").write_text(json.dumps(decision, indent=2), encoding="utf-8")
+          report = [
+              f"# {RUN_ID}",
+              "",
+              f"Verdict: `{verdict}`",
+              "",
+              "## Axis summary",
+              "",
+              axis_df.to_markdown(index=False),
+              "",
+              "## Claim ceiling",
+              "",
+              LOCKED["claim_ceiling"],
+              "",
+              "No source retuning, no window retuning, no proof/discovery/final-law claim.",
+          ]
+          (RESULTS / "R47A_REPORT.md").write_text("\n".join(report), encoding="utf-8")
+
+          manifest = []
+          for p in sorted(RESULTS.rglob("*")) + sorted(LOGS.rglob("*")):
+              if p.is_file():
+                  manifest.append({"relative_path": str(p.relative_to(ROOT)), "bytes": p.stat().st_size, "sha256": hashlib.sha256(p.read_bytes()).hexdigest()})
+          pd.DataFrame(manifest).to_csv(RESULTS / "R47A_MANIFEST_SHA256.csv", index=False)
+
+          zip_path = Path(f"{RUN_ID}.zip")
+          with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as z:
+              for sub in [RESULTS, LOGS]:
+                  for p in sub.rglob("*"):
+                      if p.is_file():
+                          z.write(p, arcname=str(Path(RUN_ID) / p.relative_to(ROOT)))
+          sha = hashlib.sha256(zip_path.read_bytes()).hexdigest()
+          Path(f"{RUN_ID}.zip.sha256.txt").write_text(f"{sha}  {RUN_ID}.zip\n", encoding="utf-8")
+          print("R47A package:", zip_path)
+          print("SHA256:", sha)
+          print("VERDICT:", verdict)
+          PYCODE
+          python r47a_run.py 2>&1 | tee "$RUN_ID/logs/r47a_console.log"
+          ls -lh "$RUN_ID"*.zip* || true
+          df -h . | tee "$RUN_ID/logs/disk_end.log"
+
+      - name: Upload R47A result artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ACIRM_R47A_EXPANDED_CONTROLS_COMPLETION_RESULTS
+          path: |
+            ACIRM_R47A_EXPANDED_CONTROLS_COMPLETION_RESULTS.zip
+            ACIRM_R47A_EXPANDED_CONTROLS_COMPLETION_RESULTS.zip.sha256.txt
+          if-no-files-found: error
+          retention-days: 14

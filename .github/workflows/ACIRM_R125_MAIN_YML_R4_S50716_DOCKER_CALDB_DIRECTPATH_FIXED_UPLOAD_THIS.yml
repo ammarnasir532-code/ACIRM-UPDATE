@@ -1,0 +1,474 @@
+name: ACIRM R125 S50716 Two-Lobe Full LAT Likelihood Docker CALDB Upload This R4
+
+"on":
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  RUN_ID: ACIRM_R125_S50716_714_TWO_LOBE_FULL_LAT_LIKELIHOOD_R1
+  FERMI_DOCKER_IMAGE: fssc/fermibottle:latest
+
+jobs:
+  r125-s50716-two-lobe-full-likelihood:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Prepare folders
+        shell: bash
+        run: |
+          set -e
+          mkdir -p "$RUN_ID/results" "$RUN_ID/logs" "$RUN_ID/data" "$RUN_ID/work" ACIRM_R125_OUTPUT
+          echo "START_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)" | tee "$RUN_ID/logs/start_utc.txt"
+          df -h . | tee "$RUN_ID/logs/disk_start.log"
+
+      - name: Pull FermiBottle Docker image
+        shell: bash
+        run: |
+          set +e
+          docker pull "$FERMI_DOCKER_IMAGE" 2>&1 | tee "$RUN_ID/logs/docker_pull.log"
+          rc=${PIPESTATUS[0]}
+          if [ "$rc" -ne 0 ]; then
+            echo "R125_DOCKER_PULL_FAILED_NO_SCIENTIFIC_NULL" | tee "$RUN_ID/results/R125_DOCKER_PULL_FAILED.txt"
+            python3 - <<'PYFAIL'
+          import json, zipfile, hashlib, pathlib, datetime
+          run_id='ACIRM_R125_S50716_714_TWO_LOBE_FULL_LAT_LIKELIHOOD_R1'
+          out=pathlib.Path('ACIRM_R125_OUTPUT'); out.mkdir(exist_ok=True)
+          res=pathlib.Path(run_id)/'results'; res.mkdir(parents=True, exist_ok=True)
+          decision={'final_status':'R125_DOCKER_PULL_FAILED_NO_SCIENTIFIC_RESULT','not_scientific_null':True,'created_utc':datetime.datetime.now(datetime.timezone.utc).isoformat()}
+          (res/'R125_FINAL_DECISION.json').write_text(json.dumps(decision, indent=2), encoding='utf-8')
+          zpath=out/'ACIRM_R125_S50716_714_TWO_LOBE_FULL_LAT_LIKELIHOOD_R1_OUTPUT_PACKAGE.zip'
+          with zipfile.ZipFile(zpath,'w',zipfile.ZIP_DEFLATED) as z:
+              for p in res.rglob('*'):
+                  if p.is_file(): z.write(p, p.name)
+          h=hashlib.sha256(zpath.read_bytes()).hexdigest()
+          (out/(zpath.name+'.sha256.txt')).write_text(h+'  '+zpath.name+'\n', encoding='utf-8')
+          PYFAIL
+            exit 0
+          fi
+
+      - name: Write and run R125 inside FermiBottle
+        shell: bash
+        run: |
+          set +e
+          cat > r125_inside_fermibottle.sh <<'R125INNER'
+          #!/usr/bin/env bash
+          set +u
+          set -o pipefail
+          export RUN_ID="${RUN_ID:-ACIRM_R125_S50716_714_TWO_LOBE_FULL_LAT_LIKELIHOOD_R1}"
+          mkdir -p "$RUN_ID/results" "$RUN_ID/logs" "$RUN_ID/data" "$RUN_ID/work" ACIRM_R125_OUTPUT
+
+          if [ -f /opt/conda/etc/profile.d/conda.sh ]; then source /opt/conda/etc/profile.d/conda.sh || true; fi
+          if command -v conda >/dev/null 2>&1; then conda activate fermi || source activate fermi || true; fi
+          for d in /opt/anaconda/envs/fermi/bin /opt/conda/envs/fermi/bin /home/fermi/miniconda3/envs/fermi/bin /opt/miniconda/envs/fermi/bin /usr/local/bin; do
+            if [ -d "$d" ]; then export PATH="$d:$PATH"; fi
+          done
+
+          {
+            echo "RUN_ID=$RUN_ID"
+            echo "PWD=$PWD"
+            echo "PATH=$PATH"
+            echo "FERMI_DIR=${FERMI_DIR:-}"
+            echo "CONDA_PREFIX=${CONDA_PREFIX:-}"
+            echo "CALDB=${CALDB:-}"
+            which python || true
+            python --version || true
+            which gtselect || true
+            which gtlike || true
+            python - <<'PYCHECK'
+          import sys
+          for m in ['fermipy','GtApp','astropy','numpy','pandas']:
+              try:
+                  __import__(m)
+                  print('IMPORT_OK', m)
+              except Exception as e:
+                  print('IMPORT_FAIL', m, repr(e))
+          PYCHECK
+          } | tee "$RUN_ID/logs/docker_env_probe_before_caldb_fix.log"
+
+          # CALDB compatibility fix R4.
+          # Previous R2 attempted /refdata/fermi/caldb, but FermiBottle runs as a non-root user
+          # and GitHub logs showed: mkdir: cannot create directory '/refdata': Permission denied.
+          # R4 therefore uses the real writable/installed CALDB path directly and creates only
+          # a local refdata mirror under $PWD for diagnostics.
+          CALDB_REAL=""
+          for c in             /opt/anaconda/envs/fermi/share/fermitools/data/caldb             /opt/conda/envs/fermi/share/fermitools/data/caldb             /usr/local/share/fermitools/data/caldb             /home/fermi/fermitools/data/caldb             /refdata/fermi/caldb; do
+            if [ -f "$c/data/glast/lat/caldb.indx" ] || [ -f "$c/software/tools/alias_config.fits" ]; then
+              CALDB_REAL="$c"; break
+            fi
+          done
+          if [ -n "$CALDB_REAL" ]; then
+            export CALDB="$CALDB_REAL"
+            mkdir -p "$PWD/refdata/fermi" || true
+            rm -f "$PWD/refdata/fermi/caldb" 2>/dev/null || true
+            ln -s "$CALDB_REAL" "$PWD/refdata/fermi/caldb" 2>/dev/null || true
+          fi
+          mkdir -p "$PWD/$RUN_ID/pfiles"
+          export PFILES="$PWD/$RUN_ID/pfiles;${PFILES:-}"
+          {
+            echo "R125_CALDB_REAL=$CALDB_REAL"
+            echo "CALDB=$CALDB"
+            echo "PFILES=$PFILES"
+            ls -lah "$CALDB/data/glast/lat/caldb.indx" 2>/dev/null || true
+            ls -lah "$CALDB/software/tools/alias_config.fits" 2>/dev/null || true
+            find "$CALDB" -maxdepth 6 -name caldb.indx -o -name alias_config.fits 2>/dev/null || true
+          } | tee "$RUN_ID/logs/docker_caldb_refdata_fix.log"
+
+          python -m pip install -q --upgrade pip || true
+          python -m pip install -q numpy pandas astropy requests pyyaml || true
+
+          cat > R125_RUN_FULL_LAT_LIKELIHOOD.py <<'PYR125'
+          #!/usr/bin/env python3
+          """
+          ACIRM R125 - S5 0716+714 two-lobe full LAT likelihood execution script.
+          Requires a runtime with Fermitools + Fermipy + CALDB + diffuse models.
+          It never converts aperture metrics into likelihood; if runtime is missing it locks runtime-blocked status.
+          """
+          import os, sys, re, csv, json, math, time, hashlib, zipfile, subprocess, datetime, shutil
+          from pathlib import Path
+          
+          RUN_ID='ACIRM_R125_S50716_714_TWO_LOBE_FULL_LAT_LIKELIHOOD_R1'
+          OUTROOT=Path('ACIRM_R125_OUTPUT').absolute()
+          WORK=Path('ACIRM_R125_WORK').absolute()
+          DATA=WORK/'data'
+          OUT=WORK/'outputs'
+          for d in [OUTROOT, WORK, DATA, OUT]: d.mkdir(parents=True, exist_ok=True)
+          
+          SOURCE_LABEL='S5 0716+714'
+          SOURCE_4FGL='4FGL J0721.9+7120'
+          SOURCE_KEYS=['4FGL J0721.9+7120','J0721.9+7120','S5 0716+714','S5 0716+71']
+          RA=110.4726958333
+          DEC=71.3434305556
+          WINDOWS={'C286':286,'P4':290,'P8':294,'L310':310}
+          CONTROLS=['C286','P8']
+          THRESHOLDS=[100,300]
+          EMAX=300000
+          ROIWIDTH=10
+          BINSZ=0.1
+          ZMAX=90
+          PHOTON_BASE='https://heasarc.gsfc.nasa.gov/FTP/fermi/data/lat/weekly/photon/'
+          SPACECRAFT_BASE='https://heasarc.gsfc.nasa.gov/FTP/fermi/data/lat/weekly/spacecraft/'
+          CATALOG_URL='https://fermi.gsfc.nasa.gov/ssc/data/access/lat/14yr_catalog/gll_psc_v35.fit'
+          
+          runtime_notes=[]
+          
+          def sha256_file(p):
+              h=hashlib.sha256()
+              with open(p,'rb') as f:
+                  for chunk in iter(lambda:f.read(1024*1024), b''): h.update(chunk)
+              return h.hexdigest()
+          
+          def write_csv(path, rows):
+              rows=list(rows)
+              keys=[]
+              for r in rows:
+                  for k in r:
+                      if k not in keys: keys.append(k)
+              with open(path,'w',newline='',encoding='utf-8') as f:
+                  w=csv.DictWriter(f, fieldnames=keys); w.writeheader(); w.writerows(rows)
+          
+          def write_json(path, obj):
+              Path(path).write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding='utf-8')
+          
+          def download(url, path, retries=3):
+              import requests
+              path=Path(path)
+              if path.exists() and path.stat().st_size>0:
+                  return path
+              for attempt in range(1,retries+1):
+                  try:
+                      print('DOWNLOAD', url)
+                      with requests.get(url, stream=True, timeout=120) as r:
+                          r.raise_for_status()
+                          tmp=path.with_suffix(path.suffix+'.part')
+                          with open(tmp,'wb') as f:
+                              for chunk in r.iter_content(1024*1024):
+                                  if chunk: f.write(chunk)
+                          tmp.rename(path)
+                      return path
+                  except Exception as e:
+                      print('DOWNLOAD_FAIL', attempt, repr(e))
+                      time.sleep(2*attempt)
+              raise RuntimeError('download failed: '+url)
+          
+          def list_file(base, pattern):
+              import requests
+              html=requests.get(base, timeout=120).text
+              m=re.search(pattern, html)
+              if not m:
+                  raise RuntimeError('cannot find file with pattern '+pattern+' at '+base)
+              return m.group(1)
+          
+          def find_diffuse_files():
+              candidates=[]
+              roots=[]
+              for env in ['FERMI_DIR','FERMI_INST_DIR','FERMITOOLS']:
+                  if os.environ.get(env): roots.append(Path(os.environ[env]))
+              roots += [Path('/opt/conda'), Path('/usr/local'), Path('/refdata/fermi'), Path('/fermi')]
+              gal=[]; iso=[]
+              for root in roots:
+                  if not root.exists(): continue
+                  for p in root.rglob('gll_iem_v07.fits'):
+                      gal.append(p)
+                  for p in root.rglob('iso_P8R3_SOURCE_V3_v1.txt'):
+                      iso.append(p)
+              return (str(gal[0]) if gal else '', str(iso[0]) if iso else '')
+          
+          def lock_runtime_blocked(reason):
+              status={
+                'run_id':RUN_ID,
+                'created_utc':datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                'final_status':'R125_LIKELIHOOD_RUNTIME_NOT_EXECUTED_PACKAGE_READY_FOR_FERMITOOLS_RUNTIME',
+                'reason':reason,
+                'claim_ceiling':'RUNTIME_BLOCKED_NOT_SCIENCE_FAIL_NOT_GENERAL002',
+                'source':SOURCE_LABEL,
+                'branch':'P4_PLUS_LATE_DOMINANT_TWO_LOBE'
+              }
+              write_json(OUT/'R125_FINAL_DECISION.json', status)
+              write_csv(OUT/'R125_RUNTIME_AUDIT.csv', [{'check':'runtime','status':'BLOCKED','detail':reason}])
+              make_zip()
+              sys.exit(0)
+          
+          def make_zip():
+              manifest=[]
+              for p in sorted(OUT.rglob('*')):
+                  if p.is_file():
+                      manifest.append({'file':p.name,'bytes':p.stat().st_size,'sha256':sha256_file(p)})
+              write_csv(OUT/'R125_MANIFEST_SHA256.csv', manifest)
+              zpath=OUTROOT/'ACIRM_R125_S50716_714_TWO_LOBE_FULL_LAT_LIKELIHOOD_R1_OUTPUT_PACKAGE.zip'
+              if zpath.exists(): zpath.unlink()
+              with zipfile.ZipFile(zpath,'w',compression=zipfile.ZIP_DEFLATED) as z:
+                  for p in sorted(OUT.rglob('*')):
+                      if p.is_file(): z.write(p, arcname=p.name)
+              digest=sha256_file(zpath)
+              (OUTROOT/(zpath.name+'.sha256.txt')).write_text(digest+'  '+zpath.name+'\n', encoding='utf-8')
+              print('OUTPUT_ZIP', zpath)
+              print('SHA256', digest)
+          
+          # Runtime checks
+          try:
+              import numpy as np, pandas as pd
+              import requests, yaml
+          except Exception as e:
+              lock_runtime_blocked('missing basic python dependency: '+repr(e))
+          
+          try:
+              import fermipy
+              from fermipy.gtanalysis import GTAnalysis
+          except Exception as e:
+              lock_runtime_blocked('Fermipy import failed: '+repr(e))
+          
+          try:
+              import GtApp
+          except Exception as e:
+              runtime_notes.append('GtApp import warning: '+repr(e))
+          
+          galdiff, isodiff = find_diffuse_files()
+          if not galdiff or not isodiff:
+              lock_runtime_blocked('diffuse models not found: gll_iem_v07.fits / iso_P8R3_SOURCE_V3_v1.txt')
+          
+          # Downloads
+          ledger=[]
+          try:
+              catalog=download(CATALOG_URL, DATA/'gll_psc_v35.fit')
+              ledger.append({'kind':'catalog','tag':'4FGL_DR4','path':str(catalog),'bytes':catalog.stat().st_size,'sha256':sha256_file(catalog)})
+              photon_files={}; sc_files={}
+              import requests
+              for tag, week in WINDOWS.items():
+                  # Fermi weekly filenames usually contain _w###_; list directory robustly.
+                  ph_html=requests.get(PHOTON_BASE,timeout=120).text
+                  sc_html=requests.get(SPACECRAFT_BASE,timeout=120).text
+                  ph_pat=r'href="([^"<>]*w%03d[^"<>]*\.fits)"' % week
+                  sc_pat=r'href="([^"<>]*w%03d[^"<>]*\.fits)"' % week
+                  ph_m=re.search(ph_pat, ph_html); sc_m=re.search(sc_pat, sc_html)
+                  if not ph_m: raise RuntimeError('photon weekly file not found for week '+str(week))
+                  if not sc_m: raise RuntimeError('spacecraft weekly file not found for week '+str(week))
+                  ph=download(PHOTON_BASE+ph_m.group(1), DATA/ph_m.group(1))
+                  sc=download(SPACECRAFT_BASE+sc_m.group(1), DATA/sc_m.group(1))
+                  photon_files[tag]=ph; sc_files[tag]=sc
+                  ledger.append({'kind':'photon','tag':tag,'week':week,'path':str(ph),'bytes':ph.stat().st_size,'sha256':sha256_file(ph)})
+                  ledger.append({'kind':'spacecraft','tag':tag,'week':week,'path':str(sc),'bytes':sc.stat().st_size,'sha256':sha256_file(sc)})
+          except Exception as e:
+              lock_runtime_blocked('download/listing failed: '+repr(e))
+          write_csv(OUT/'R125_DOWNLOAD_LEDGER.csv', ledger)
+          
+          # Create configs and run fermipy for each tag/threshold
+          rows=[]
+          config_rows=[]
+          for emin in THRESHOLDS:
+              for tag in ['C286','P4','P8','L310']:
+                  run_name=f'{tag}_E{int(emin)}'
+                  wdir=WORK/'fermipy_runs'/run_name
+                  wdir.mkdir(parents=True, exist_ok=True)
+                  cfg={
+                    'data': {'evfile': str(photon_files[tag]), 'scfile': str(sc_files[tag])},
+                    'binning': {'roiwidth': ROIWIDTH, 'binsz': BINSZ, 'binsperdec': 8, 'coordsys':'CEL'},
+                    'selection': {'ra': RA, 'dec': DEC, 'emin': float(emin), 'emax': float(EMAX), 'zmax': ZMAX, 'evclass': 128, 'evtype': 3, 'filter':'DATA_QUAL>0 && LAT_CONFIG==1'},
+                    'gtlike': {'edisp': True, 'irfs':'P8R3_SOURCE_V3'},
+                    'model': {'src_radius': 15.0, 'galdiff': galdiff, 'isodiff': isodiff, 'catalogs':[str(catalog)]},
+                    'fileio': {'outdir': str(wdir), 'usescratch': False, 'scratchdir': str(wdir/'scratch')},
+                    'logging': {'verbosity': 3}
+                  }
+                  cfg_path=wdir/'config.yaml'
+                  import yaml
+                  cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding='utf-8')
+                  config_rows.append({'tag':tag,'emin':emin,'config_path':str(cfg_path)})
+                  try:
+                      print('FERMIPY_SETUP', run_name)
+                      gta=GTAnalysis(str(cfg_path), logging={'verbosity':3})
+                      gta.setup()
+                      try:
+                          gta.optimize()
+                      except Exception as e:
+                          runtime_notes.append(f'{run_name} optimize warning: {repr(e)}')
+                      fitres=gta.fit()
+                      src=None
+                      for key in SOURCE_KEYS:
+                          try:
+                              src=gta.roi[key]
+                              found=key
+                              break
+                          except Exception:
+                              continue
+                      if src is None:
+                          # choose nearest source by name substring, fallback to ROI source closest to RA/Dec if possible
+                          names=[s.name for s in gta.roi.sources]
+                          match=[n for n in names if '0721.9' in n or '0716' in n]
+                          if match:
+                              src=gta.roi[match[0]]; found=match[0]
+                          else:
+                              found='TARGET_NOT_FOUND'
+                      if src is None:
+                          row={'tag':tag,'emin':emin,'status':'TARGET_NOT_FOUND','ts':float('nan'),'npred':float('nan'),'flux':float('nan'),'flux_err':float('nan'),'found_name':found}
+                      else:
+                          row={
+                            'tag':tag,'week':WINDOWS[tag],'emin':emin,'status':'OK','found_name':found,
+                            'ts':float(src.get('ts', float('nan'))) if isinstance(src, dict) else float(getattr(src,'ts',float('nan'))),
+                            'npred':float(src.get('npred', float('nan'))) if isinstance(src, dict) else float(getattr(src,'npred',float('nan'))),
+                            'flux':float(src.get('flux', float('nan'))) if isinstance(src, dict) else float(getattr(src,'flux',float('nan'))),
+                            'flux_err':float(src.get('flux_err', float('nan'))) if isinstance(src, dict) else float(getattr(src,'flux_err',float('nan'))),
+                          }
+                      rows.append(row)
+                      # Write ROI summary where possible
+                      try:
+                          gta.write_roi(str(wdir/'roi_final'), make_plots=False)
+                      except Exception as e:
+                          runtime_notes.append(f'{run_name} write_roi warning: {repr(e)}')
+                  except Exception as e:
+                      rows.append({'tag':tag,'week':WINDOWS[tag],'emin':emin,'status':'FERMIPY_RUN_FAILED','error':repr(e),'ts':float('nan'),'npred':float('nan'),'flux':float('nan'),'flux_err':float('nan')})
+          
+          write_csv(OUT/'R125_FERMIPY_CONFIGS.csv', config_rows)
+          write_csv(OUT/'R125_LIKELIHOOD_METRICS_BY_WINDOW.csv', rows)
+          write_csv(OUT/'R125_RUNTIME_NOTES.csv', [{'note':n} for n in runtime_notes] or [{'note':'none'}])
+          
+          # Decision logic
+          import pandas as pd, math
+          df=pd.DataFrame(rows)
+          metric_decisions=[]
+          full_pass_count=0
+          partial_count=0
+          for emin in THRESHOLDS:
+              sub=df[(df['emin']==emin) & (df['status']=='OK')].copy()
+              if set(['C286','P4','P8','L310']).issubset(set(sub['tag'])):
+                  vals={r['tag']:r for _,r in sub.iterrows()}
+                  ctrl=max(float(vals['C286'].get('ts',float('nan'))), float(vals['P8'].get('ts',float('nan'))))
+                  for metric in ['ts','npred','flux']:
+                      try:
+                          cmax=max(float(vals['C286'][metric]), float(vals['P8'][metric]))
+                          p4=float(vals['P4'][metric]); late=float(vals['L310'][metric])
+                          passed=bool(math.isfinite(cmax) and math.isfinite(p4) and math.isfinite(late) and late>p4 and p4>cmax)
+                          metric_decisions.append({'emin':emin,'metric':metric,'control_max':cmax,'P4':p4,'L310':late,'pattern':'L310>P4>controls','pass':passed})
+                      except Exception as e:
+                          metric_decisions.append({'emin':emin,'metric':metric,'error':repr(e),'pass':False})
+              else:
+                  metric_decisions.append({'emin':emin,'metric':'ALL','error':'missing OK rows for all windows','pass':False})
+          write_csv(OUT/'R125_LIKELIHOOD_TWO_LOBE_DECISION_GATES.csv', metric_decisions)
+          
+          # Aggregate
+          pass_by_metric={}
+          for r in metric_decisions:
+              if 'metric' in r and r.get('metric') in ['ts','npred','flux']:
+                  pass_by_metric.setdefault(r['metric'],[]).append(str(r.get('pass'))=='True' or r.get('pass') is True)
+          metric_full={m:(len(v)==len(THRESHOLDS) and all(v)) for m,v in pass_by_metric.items()}
+          num_full=sum(1 for v in metric_full.values() if v)
+          any_fail_runs=any(r.get('status')!='OK' for r in rows)
+          if any_fail_runs:
+              final='R125_LIKELIHOOD_EXECUTED_WITH_PARTIAL_RUN_FAILURES_REVIEW_REQUIRED_NOT_CATALOG'
+          elif num_full>=2:
+              final='R125_FULL_LAT_LIKELIHOOD_TWO_LOBE_SUPPORT_READY_FOR_CATALOG_REVIEW_NOT_GENERAL002'
+          elif num_full==1:
+              final='R125_PARTIAL_LAT_LIKELIHOOD_TWO_LOBE_SUPPORT_HOLD_NOT_CATALOG'
+          else:
+              final='R125_LAT_LIKELIHOOD_DOES_NOT_SUPPORT_TWO_LOBE_PATTERN_RETAIN_PREFLIGHT_ONLY'
+          
+          status={
+            'run_id':RUN_ID,
+            'created_utc':datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            'source':SOURCE_LABEL,
+            'branch':'P4_PLUS_LATE_DOMINANT_TWO_LOBE',
+            'final_status':final,
+            'metric_full_pass':metric_full,
+            'num_metric_full_pass':num_full,
+            'runtime_failures_present':any_fail_runs,
+            'claim_ceiling':'NOT_GENERAL002_NOT_PARTICLE_PROOF_NOT_MATTER_PROOF',
+            'decision_rule':'Strong if at least two of TS/npred/flux satisfy L310>P4>controls at both E>=100 and E>=300.'
+          }
+          write_json(OUT/'R125_FINAL_DECISION.json', status)
+          make_zip()
+          PYR125
+
+          python R125_RUN_FULL_LAT_LIKELIHOOD.py 2>&1 | tee "$RUN_ID/logs/r125_python_run.log"
+          rc=${PIPESTATUS[0]}
+          echo "R125_INNER_RC=$rc" | tee "$RUN_ID/logs/r125_inner_rc.txt"
+          exit 0
+          R125INNER
+
+          chmod +x r125_inside_fermibottle.sh
+          echo "R125_HOST_DEBUG_BEFORE_DOCKER" | tee "$RUN_ID/logs/r125_host_debug_before_docker.log"
+          pwd | tee -a "$RUN_ID/logs/r125_host_debug_before_docker.log"
+          ls -lah | tee -a "$RUN_ID/logs/r125_host_debug_before_docker.log"
+          ls -lah r125_inside_fermibottle.sh | tee -a "$RUN_ID/logs/r125_host_debug_before_docker.log"
+          docker run --rm \
+            -e RUN_ID="$RUN_ID" \
+            -v "$PWD":/work \
+            -w /work \
+            "$FERMI_DOCKER_IMAGE" \
+            bash /work/r125_inside_fermibottle.sh 2>&1 | tee "$RUN_ID/logs/docker_run_r125.log"
+          rc=${PIPESTATUS[0]}
+          echo "DOCKER_RUN_RC=$rc" | tee "$RUN_ID/logs/docker_run_rc.txt"
+
+          if ! ls ACIRM_R125_OUTPUT/*.zip >/dev/null 2>&1; then
+            echo "R125_NO_OUTPUT_ZIP_CREATED_RUNTIME_FAILURE" | tee "$RUN_ID/results/R125_NO_OUTPUT_ZIP_CREATED.txt"
+            python3 - <<'PYNOZIP'
+          import json, zipfile, hashlib, pathlib, datetime
+          run_id='ACIRM_R125_S50716_714_TWO_LOBE_FULL_LAT_LIKELIHOOD_R1'
+          out=pathlib.Path('ACIRM_R125_OUTPUT'); out.mkdir(exist_ok=True)
+          res=pathlib.Path(run_id)/'results'; logs=pathlib.Path(run_id)/'logs'
+          res.mkdir(parents=True, exist_ok=True)
+          decision={'final_status':'R125_RUNTIME_FAILED_NO_LIKELIHOOD_OUTPUT_NOT_SCIENCE_FAIL','not_scientific_null':True,'created_utc':datetime.datetime.now(datetime.timezone.utc).isoformat(),'claim_ceiling':'RUNTIME_FAILURE_NOT_GENERAL002'}
+          (res/'R125_FINAL_DECISION.json').write_text(json.dumps(decision, indent=2), encoding='utf-8')
+          zpath=out/'ACIRM_R125_S50716_714_TWO_LOBE_FULL_LAT_LIKELIHOOD_R1_OUTPUT_PACKAGE.zip'
+          with zipfile.ZipFile(zpath,'w',zipfile.ZIP_DEFLATED) as z:
+              for root in [res, logs]:
+                  if root.exists():
+                      for p in root.rglob('*'):
+                          if p.is_file(): z.write(p, str(p))
+          h=hashlib.sha256(zpath.read_bytes()).hexdigest()
+          (out/(zpath.name+'.sha256.txt')).write_text(h+'  '+zpath.name+'\n', encoding='utf-8')
+          PYNOZIP
+          fi
+
+          ls -lah ACIRM_R125_OUTPUT || true
+
+      - name: Upload R125 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ACIRM_R125_S50716_714_TWO_LOBE_FULL_LAT_LIKELIHOOD_OUTPUT
+          path: |
+            ACIRM_R125_OUTPUT/*.zip
+            ACIRM_R125_OUTPUT/*.sha256.txt
+            ${{ env.RUN_ID }}/logs/*.log
+            ${{ env.RUN_ID }}/logs/*.txt
+          if-no-files-found: error

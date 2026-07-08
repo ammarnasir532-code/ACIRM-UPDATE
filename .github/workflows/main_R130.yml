@@ -1,0 +1,172 @@
+name: ACIRM R130 Slim Extract R129 R125 Results
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  slim_extract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    env:
+      R129_RUN_ID: "28953912865"
+      R129_ARTIFACT_ID: "8173424398"
+      OUT_NAME: "ACIRM_R130_R129_R125_SLIM_LIKELIHOOD_RESULTS"
+
+    steps:
+      - name: Download R129 artifact inside GitHub
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ env.R129_RUN_ID }}
+          artifact-ids: ${{ env.R129_ARTIFACT_ID }}
+          github-token: ${{ github.token }}
+          path: r129_artifact
+
+      - name: Build slim phone artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Downloaded artifact tree:"
+          du -h -d 2 r129_artifact || true
+          find r129_artifact -maxdepth 3 -type f -printf '%s %p\n' | sort -nr | head -80 || true
+
+          python3 - <<'PY'
+          import csv, hashlib, json, os, re, shutil, zipfile
+          from pathlib import Path
+
+          root = Path('r129_artifact')
+          slim = Path('r130_slim')
+          if slim.exists():
+              shutil.rmtree(slim)
+          slim.mkdir(parents=True, exist_ok=True)
+
+          allowed_ext = {'.csv', '.json', '.txt', '.md', '.log', '.yml', '.yaml'}
+          max_copy_bytes = 8 * 1024 * 1024
+          max_log_tail_bytes = 512 * 1024
+          inventory_rows = []
+          copied_rows = []
+          skipped_rows = []
+
+          def safe_rel(name: str) -> Path:
+              name = name.replace('\\', '/')
+              name = re.sub(r'^/+', '', name)
+              parts = []
+              for p in name.split('/'):
+                  if not p or p in ('.', '..'):
+                      continue
+                  parts.append(re.sub(r'[^A-Za-z0-9._+\-=]+', '_', p))
+              return Path(*parts) if parts else Path('unnamed')
+
+          def sha256_path(p: Path) -> str:
+              h = hashlib.sha256()
+              with p.open('rb') as f:
+                  for chunk in iter(lambda: f.read(1024 * 1024), b''):
+                      h.update(chunk)
+              return h.hexdigest()
+
+          def copy_regular_file(src: Path, dst_rel_prefix: Path):
+              rel = src.relative_to(root)
+              size = src.stat().st_size
+              ext = src.suffix.lower()
+              inventory_rows.append({'container':'filesystem','path':str(rel),'size':size,'kind':'file','sha256':sha256_path(src)})
+              if ext in allowed_ext and size <= max_copy_bytes:
+                  dst = slim / dst_rel_prefix / safe_rel(str(rel))
+                  dst.parent.mkdir(parents=True, exist_ok=True)
+                  shutil.copy2(src, dst)
+                  copied_rows.append({'source':'filesystem','path':str(rel),'size':size,'copied_to':str(dst.relative_to(slim))})
+              elif ext in {'.log', '.txt'} and size > max_copy_bytes:
+                  dst = slim / dst_rel_prefix / safe_rel(str(rel) + '.tail.txt')
+                  dst.parent.mkdir(parents=True, exist_ok=True)
+                  with src.open('rb') as f:
+                      f.seek(max(0, size - max_log_tail_bytes))
+                      data = f.read()
+                  dst.write_bytes(data)
+                  copied_rows.append({'source':'filesystem_tail','path':str(rel),'size':size,'copied_to':str(dst.relative_to(slim))})
+              else:
+                  skipped_rows.append({'source':'filesystem','path':str(rel),'size':size,'reason':'large_or_disallowed_extension'})
+
+          for p in root.rglob('*'):
+              if p.is_file():
+                  copy_regular_file(p, Path('filesystem_small_files'))
+
+          zip_files = [p for p in root.rglob('*.zip') if p.is_file()]
+          for zpath in zip_files:
+              zsha = sha256_path(zpath)
+              zsize = zpath.stat().st_size
+              zlabel = safe_rel(zpath.name).with_suffix('')
+              try:
+                  with zipfile.ZipFile(zpath, 'r') as z:
+                      for info in z.infolist():
+                          if info.is_dir():
+                              continue
+                          member = info.filename
+                          ext = Path(member).suffix.lower()
+                          inventory_rows.append({
+                              'container': str(zpath.relative_to(root)),
+                              'path': member,
+                              'size': info.file_size,
+                              'kind': 'zip_member',
+                              'sha256': ''
+                          })
+                          should_copy = (ext in allowed_ext and info.file_size <= max_copy_bytes)
+                          if should_copy:
+                              dst = slim / 'zip_small_members' / zlabel / safe_rel(member)
+                              dst.parent.mkdir(parents=True, exist_ok=True)
+                              with z.open(info, 'r') as zin, dst.open('wb') as out:
+                                  shutil.copyfileobj(zin, out)
+                              copied_rows.append({'source':str(zpath.relative_to(root)),'path':member,'size':info.file_size,'copied_to':str(dst.relative_to(slim))})
+                          else:
+                              skipped_rows.append({'source':str(zpath.relative_to(root)),'path':member,'size':info.file_size,'reason':'large_or_disallowed_zip_member'})
+              except Exception as e:
+                  skipped_rows.append({'source':str(zpath.relative_to(root)),'path':'<zip_open>','size':zsize,'reason':repr(e)})
+
+          def write_csv(path, rows, fields):
+              path.parent.mkdir(parents=True, exist_ok=True)
+              with path.open('w', newline='', encoding='utf-8') as f:
+                  w = csv.DictWriter(f, fieldnames=fields)
+                  w.writeheader()
+                  for r in rows:
+                      w.writerow({k:r.get(k,'') for k in fields})
+
+          write_csv(slim / 'R130_FULL_ARTIFACT_INVENTORY.csv', inventory_rows, ['container','path','size','kind','sha256'])
+          write_csv(slim / 'R130_COPIED_SMALL_RESULTS.csv', copied_rows, ['source','path','size','copied_to'])
+          write_csv(slim / 'R130_SKIPPED_LARGE_OR_BINARY_FILES.csv', skipped_rows, ['source','path','size','reason'])
+
+          # Try to infer whether likelihood numerical products exist from filenames and copied content names.
+          lower_paths = [str(r.get('path','')).lower() for r in inventory_rows]
+          signals = {
+              'has_likelihood_csv': any(('likelihood' in p and p.endswith('.csv')) for p in lower_paths),
+              'has_fermipy_log': any(('fermipy' in p and (p.endswith('.log') or p.endswith('.txt'))) for p in lower_paths),
+              'has_ts_or_flux_named_file': any((('ts' in p or 'flux' in p or 'npred' in p) and p.endswith(('.csv','.json','.txt'))) for p in lower_paths),
+              'zip_count': len(zip_files),
+              'total_inventory_files': len(inventory_rows),
+              'copied_small_files': len(copied_rows),
+          }
+          (slim / 'R130_SLIM_EXTRACTION_SUMMARY.json').write_text(json.dumps(signals, indent=2, ensure_ascii=False), encoding='utf-8')
+          (slim / 'README_R130_AR.txt').write_text(
+              'ACIRM R130 slim extraction of the large R129/R125 GitHub artifact.\n'
+              'Purpose: avoid downloading the 500+ MB artifact to phone.\n'
+              'This package contains only small CSV/JSON/TXT/MD/YAML/log products and inventories.\n'
+              'Scientific judgment must be made from extracted likelihood files if present.\n'
+              'If TS/npred/flux files are absent, R125 still needs output-path or runtime repair.\n',
+              encoding='utf-8'
+          )
+          PY
+
+          zip -r "${OUT_NAME}.zip" r130_slim >/dev/null
+          sha256sum "${OUT_NAME}.zip" > "${OUT_NAME}.zip.sha256.txt"
+          ls -lh "${OUT_NAME}.zip" "${OUT_NAME}.zip.sha256.txt"
+
+      - name: Upload slim results artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ACIRM_R130_R129_R125_SLIM_LIKELIHOOD_RESULTS
+          path: |
+            ACIRM_R130_R129_R125_SLIM_LIKELIHOOD_RESULTS.zip
+            ACIRM_R130_R129_R125_SLIM_LIKELIHOOD_RESULTS.zip.sha256.txt
+          if-no-files-found: error
+          retention-days: 14

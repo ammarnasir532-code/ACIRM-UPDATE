@@ -1,0 +1,18 @@
+name: ACIRM Upload Safe Test
+
+"on":
+  workflow_dispatch:
+
+jobs:
+  upload_safe_test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Write test result
+        run: |
+          echo "UPLOAD_SAFE_OK" > result.txt
+          date -u >> result.txt
+      - name: Upload test artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ACIRM_UPLOAD_SAFE_TEST_RESULTS
+          path: result.txt
